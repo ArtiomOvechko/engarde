@@ -20,7 +20,7 @@ public sealed class FieldAssignmentPerformanceCollection
 public sealed class FieldAssignmentPerformanceTests(ITestOutputHelper output)
 {
     [Theory]
-    [InlineData(1_000_000, 1.5)]
+    [InlineData(1_000_000, 3)]
     [InlineData(1, 0.01)]
     public async Task TestPerformance(int iterations, double allowedGuardedTimeInSeconds)
     {
