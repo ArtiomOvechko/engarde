@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <Authors>Artem Ovechko</Authors>
-    <PackageId>Engarde.Testing</PackageId>
+    <PackageId>En-Garde.Testing</PackageId>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
