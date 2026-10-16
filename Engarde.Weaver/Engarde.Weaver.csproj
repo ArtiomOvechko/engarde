@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <RollForward>Major</RollForward>
+        <UseAppHost>false</UseAppHost>
+        <IsPackable>false</IsPackable>
+        <EngardeWeavingEnabled>false</EngardeWeavingEnabled>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+    </ItemGroup>
+
+    <!-- Referenced only for build order, so its runtime files must not be copied into referencing projects -->
+    <Target Name="ExcludeFromReferencingProjects" AfterTargets="AddDepsJsonAndRuntimeConfigToCopyItemsForReferencingProjects">
+        <ItemGroup>
+            <AllItemsFullPathWithTargetPath Remove="$(ProjectDepsFilePath);$(ProjectRuntimeConfigFilePath);$(ProjectRuntimeConfigDevFilePath)" />
+        </ItemGroup>
+    </Target>
+
+</Project>

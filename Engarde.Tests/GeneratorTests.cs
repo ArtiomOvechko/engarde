@@ -1,0 +1,349 @@
+using Engarde;
+using Engarde.Generators;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Xunit;
+
+namespace Tests;
+
+public sealed class GeneratorTests
+{
+    private static (GeneratorDriverRunResult Result, Compilation Output) Generate(string declaration)
+    {
+        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
+            .Select(path => MetadataReference.CreateFromFile(path)).ToList();
+        references.Add(MetadataReference.CreateFromFile(typeof(EngardeAttribute).Assembly.Location));
+        var compilation = CSharpCompilation.Create("GeneratorConsumer",
+            [CSharpSyntaxTree.ParseText("using Engarde;\n" + declaration)], references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(new GuardGenerator());
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var output, out _);
+        return (driver.GetRunResult(), output);
+    }
+
+    [Fact]
+    public void Generates_compilable_overloads_for_primary_and_regular_constructors()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            public partial class Guard(int @event, params string[] featureNames) : EngardeAttribute(featureNames);
+            public sealed partial class FixedGuard(int id) : EngardeAttribute("fixed");
+            public partial class SingleFlagGuard(string featureName) : EngardeAttribute(featureName);
+            public sealed partial class DefaultGuard : EngardeAttribute;
+            public sealed partial class PoolGuard(string featurePool) : EngardeAttribute("fixed");
+            public sealed partial class Outer<T> where T : struct
+            {
+                public partial class Nested<U>(U? setting, params string[] features) : EngardeAttribute(features) where U : class;
+            }
+            public static class Caller
+            {
+                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync() => await Guard.CreateInstance().IsEnabledAsync(1, "flag")
+                    && await FixedGuard.CreateInstance().IsEnabledAsync(2) && await SingleFlagGuard.CreateInstance().IsEnabledAsync("flag") && await DefaultGuard.CreateInstance().IsEnabledAsync()
+                    && await Outer<int>.Nested<string>.CreateInstance().IsEnabledAsync(null, "flag") && await PoolGuard.CreateInstance().IsEnabledAsync("pool");
+            }
+            """);
+        Assert.Empty(result.Diagnostics);
+        Assert.Equal(7, result.GeneratedTrees.Length);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var guardTrees = result.GeneratedTrees.Where(tree => !tree.FilePath.EndsWith("Engarde.GeneratedQueryRegistrations.g.cs")).ToArray();
+        foreach (var tree in guardTrees)
+        {
+            var methods = tree.GetRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .Where(method => method.Identifier.ValueText == "IsEnabledAsync").ToArray();
+            Assert.NotEmpty(methods);
+            Assert.All(methods, method =>
+            {
+                Assert.Equal("IsEnabledAsync", method.Identifier.ValueText);
+                Assert.Equal("global::System.Threading.Tasks.ValueTask<bool>", method.ReturnType.ToString());
+                Assert.DoesNotContain(method.Modifiers, modifier => modifier.ValueText == "static");
+            });
+            Assert.Single(tree.GetRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>());
+        }
+        var registrations = result.GeneratedTrees.Single(tree => tree.FilePath.EndsWith("Engarde.GeneratedQueryRegistrations.g.cs")).ToString();
+        Assert.Contains("typeof(global::Consumer.IGuard)", registrations);
+        Assert.Contains("typeof(global::Consumer.Guard.__EngardeQueries)", registrations);
+        Assert.Contains("ModuleInitializer", registrations);
+    }
+
+    [Fact]
+    public void Generates_exactly_one_bound_or_unbound_query_per_constructor()
+    {
+        var (result, output) = Generate("""
+            public partial class UnboundGuard(int setting, params string[] features) : EngardeAttribute(features);
+            public sealed partial class BoundGuard(int setting) : EngardeAttribute("fixed");
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .ToDictionary(contract => contract.Identifier.ValueText);
+        var unbound = Assert.Single(contracts["IUnboundGuard"].Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        Assert.Equal(new[] { "setting", "featureFlagName" }, unbound.ParameterList.Parameters
+            .Select(parameter => parameter.Identifier.ValueText));
+        var bound = Assert.Single(contracts["IBoundGuard"].Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        Assert.Equal(new[] { "setting" }, bound.ParameterList.Parameters
+            .Select(parameter => parameter.Identifier.ValueText));
+    }
+
+    [Fact]
+    public void Does_not_expose_less_accessible_constructors_through_public_helpers()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            internal sealed class InternalSetting;
+            public sealed partial class Guard : EngardeAttribute
+            {
+                public Guard() : base("fixed") { }
+                private Guard(InternalSetting setting) : base("fixed") { }
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .Single(type => type.Identifier.ValueText == "IGuard");
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        Assert.Empty(method.ParameterList.Parameters);
+    }
+
+    [Fact]
+    public void Does_not_generate_query_helpers_when_a_public_guard_has_only_a_private_constructor()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            internal sealed class InternalSetting;
+            public sealed partial class Guard : EngardeAttribute
+            {
+                private Guard(InternalSetting setting) : base("fixed") { }
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        Assert.DoesNotContain(result.GeneratedTrees, tree => tree.ToString().Contains("interface IGuard"));
+    }
+
+    [Fact]
+    public void Feature_bound_generation_does_not_expose_less_accessible_template_constructors()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            internal sealed class InternalSetting;
+            [GenerateFeatureGuards("feature")]
+            public partial class PermissionGuard : EngardeAttribute
+            {
+                public PermissionGuard() { }
+                internal PermissionGuard(InternalSetting setting) { }
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .Single(type => type.Identifier.ValueText == "IFeaturePermissionGuard");
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        Assert.Empty(method.ParameterList.Parameters);
+        var generatedGuard = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax>())
+            .Single(type => type.Identifier.ValueText == "FeaturePermissionGuard");
+        Assert.Single(generatedGuard.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax>());
+    }
+
+    [Fact]
+    public void Generates_sealed_feature_bound_guards_from_an_inheritable_template()
+    {
+        var (result, output) = Generate("""
+            [GenerateFeatureGuards("feature1", "feature-two")]
+            public partial class PermissionGuard(int level) : EngardeAttribute;
+            public static class Consumer
+            {
+                public static IFeature1PermissionGuard First => Feature1PermissionGuard.CreateInstance();
+                public static IFeatureTwoPermissionGuard Second => FeatureTwoPermissionGuard.CreateInstance();
+                public static async System.Threading.Tasks.ValueTask<bool> Check() =>
+                    await First.IsEnabledAsync(1) && await Second.IsEnabledAsync(2);
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        Assert.Equal(3, result.GeneratedTrees.Length);
+        var classes = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax>())
+            .Where(type => type.Identifier.ValueText is "Feature1PermissionGuard" or "FeatureTwoPermissionGuard")
+            .ToDictionary(type => type.Identifier.ValueText);
+        Assert.Equal(2, classes.Count);
+        Assert.All(classes.Values, type => Assert.Contains(type.Modifiers, modifier => modifier.ValueText == "sealed"));
+        foreach (var interfaceName in new[] { "IFeature1PermissionGuard", "IFeatureTwoPermissionGuard" })
+        {
+            var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                    .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+                .Single(type => type.Identifier.ValueText == interfaceName);
+            var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+            Assert.Equal("int level", Assert.Single(method.ParameterList.Parameters).ToString());
+        }
+    }
+
+    [Fact]
+    public void Rejects_a_user_written_feature_bound_guard_that_is_not_sealed()
+    {
+        var (result, _) = Generate("public partial class FixedGuard : EngardeAttribute(\"fixed\");");
+
+        var diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal("EG1003", diagnostic.Id);
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains("must be sealed", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public void Generates_default_IEngarde_for_the_core_compilation()
+    {
+        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
+            .Select(path => MetadataReference.CreateFromFile(path));
+        var compilation = CSharpCompilation.Create("Engarde.Core",
+            [CSharpSyntaxTree.ParseText("""
+                namespace Engarde;
+                public sealed class Engarde { }
+                public class EngardeAttribute : System.Attribute { }
+                """)], references, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(new GuardGenerator());
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var output, out _);
+
+        var tree = Assert.Single(driver.GetRunResult().GeneratedTrees);
+        Assert.Equal("IEngarde.g.cs", Path.GetFileName(tree.FilePath));
+        var contract = tree.GetRoot().DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>().Single();
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        Assert.Equal("IEngarde", contract.Identifier.ValueText);
+        Assert.Equal("IsEnabledAsync", method.Identifier.ValueText);
+        Assert.Equal("string featureFlagName", Assert.Single(method.ParameterList.Parameters).ToString());
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Theory]
+    [InlineData("public partial class Guard : EngardeAttribute { public Guard(int id, string featureName) : base(featureName) { } public Guard(int id, params string[] features) : base(features) { } }")]
+    [InlineData("public sealed partial class Guard : EngardeAttribute { public Guard(ref int id) { } }")]
+    [InlineData("public class Outer { public sealed partial class Guard : EngardeAttribute { } }")]
+    public void Reports_actionable_diagnostic_for_unsupported_shapes(string declaration)
+    {
+        var (result, _) = Generate(declaration);
+        Assert.Contains(result.Diagnostics, d => d.Id == "EG1001" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Generates_private_nested_generic_interfaces_with_matching_constraints()
+    {
+        var (result, output) = Generate("""
+            public partial class Outer<T> where T : class, System.IDisposable, new()
+            {
+                private sealed partial class Hidden<U>(U setting) : EngardeAttribute("fixed") where U : unmanaged;
+                public static System.Threading.Tasks.ValueTask<bool> Query() => Hidden<int>.CreateInstance().IsEnabledAsync(7);
+            }
+            """);
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contract = Assert.Single(result.GeneratedTrees).GetRoot().DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>().Single();
+        Assert.Equal("IHidden", contract.Identifier.ValueText);
+        Assert.Contains(contract.Modifiers, modifier => modifier.ValueText == "private");
+        Assert.Equal("where U : unmanaged", Assert.Single(contract.ConstraintClauses).ToString());
+    }
+
+    [Fact]
+    public void Derived_partial_guards_get_their_own_interfaces_and_factory_return_types()
+    {
+        var (result, output) = Generate("""
+            public partial class ParentGuard(params string[] features) : EngardeAttribute(features);
+            public sealed partial class ChildGuard() : ParentGuard("fixed");
+            public class Consumer
+            {
+                public IChildGuard Query => ChildGuard.CreateInstance();
+                public IParentGuard Parent => ParentGuard.CreateInstance();
+            }
+            """);
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        Assert.DoesNotContain(output.GetDiagnostics(), d => d.Id == "CS0108");
+    }
+
+    [Theory]
+    [InlineData("ref", "int")]
+    [InlineData("in", "int")]
+    [InlineData("out", "int")]
+    [InlineData("ref", "object")]
+    [InlineData("in", "object")]
+    [InlineData("out", "object")]
+    [InlineData("ref readonly", "object")]
+    public void Rejects_guarded_by_reference_parameters(string modifier, string type)
+    {
+        var body = modifier == "out" ? "value = default;" : "";
+        var declaration = $$"""
+            public class Consumer
+            {
+                public void Update([Engarde("flag")] {{modifier}} {{type}} value) { {{body}} }
+            }
+            """;
+
+        var (result, output) = Generate(declaration);
+
+        var diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal("EG1002", diagnostic.Id);
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains("'value'", diagnostic.GetMessage());
+        Assert.Contains("pass it by value or guard the method instead", diagnostic.GetMessage());
+        Assert.Equal("Engarde(\"flag\")", diagnostic.Location.SourceTree!.GetText().ToString(diagnostic.Location.SourceSpan));
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Theory]
+    [InlineData("public interface Consumer { void Update([Guard] ref int value); }")]
+    [InlineData("public abstract class Consumer { public abstract void Update([Guard] in object value); }")]
+    [InlineData("public class Consumer { public Consumer([Guard] out int value) { value = 0; } }")]
+    [InlineData("public delegate void Consumer([Guard] ref object value);")]
+    [InlineData("public class Consumer { public void Update<T>([Guard] ref T value) { } }")]
+    [InlineData("public class Consumer { public void Update() { void Local([Guard] ref int value) { } } }")]
+    [InlineData("public class Consumer { public delegate void Callback(ref int value); public Callback Update = ([Guard] ref int value) => { }; }")]
+    public void Rejects_derived_guards_across_parameter_declarations(string declaration)
+    {
+        var (result, output) = Generate("""
+            public class BaseGuard : EngardeAttribute;
+            public class Guard : BaseGuard;
+            """ + declaration);
+
+        Assert.Equal("EG1002", Assert.Single(result.Diagnostics).Id);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void Allows_by_value_reference_types_and_unguarded_by_reference_parameters()
+    {
+        var (result, output) = Generate("""
+            public class Consumer
+            {
+                [Engarde("flag")] public object Value { get; set; }
+                public void Update([Engarde("flag")] object value, [Engarde("flag")] int number) { }
+                [Engarde("flag")]
+                public void Update(ref object value, in int input, out int output) { output = input; }
+                public void Other([System.Runtime.InteropServices.In] ref int value) { }
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void Leaves_existing_non_partial_and_abstract_guards_unchanged()
+    {
+        var (result, _) = Generate("""
+            public class ExistingGuard : EngardeAttribute;
+            public abstract partial class AbstractGuard : EngardeAttribute;
+            """);
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(result.GeneratedTrees);
+    }
+}

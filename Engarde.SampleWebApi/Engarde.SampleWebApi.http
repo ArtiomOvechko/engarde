@@ -1,0 +1,40 @@
+@host = http://localhost:5001
+
+# Enable weatherforecast for GET requests and weatherforecast_edit for POST.
+# To enable both when starting the sample:
+# dotnet run --project Engarde.SampleWebApi/Engarde.SampleWebApi.csproj -- --weatherforecast=true --weatherforecast_edit=true
+
+### Minimal API: get five forecasts (flag: weatherforecast, enabled)
+GET {{host}}/weatherforecast
+Accept: application/json
+
+### Controller: get five forecasts (flag: weatherforecast_new, disabled)
+GET {{host}}/api/weatherforecast
+Accept: application/json
+
+### Controller: append weather summaries (flag: weatherforecast, enabled)
+POST {{host}}/api/weatherforecast
+Content-Type: application/json
+Accept: application/json
+
+{
+  "Names" : [
+    "Stormy",
+    "Humid"
+  ]
+}
+
+### Controller: overwrite weather summaries (flag: weatherforecast_edit, disabled)
+POST {{host}}/api/weatherforecast
+Content-Type: application/json
+Accept: application/json
+
+{
+  "Names" : [
+    "Stormy",
+    "Humid"
+  ],
+  "Overwrite": true
+}
+
+###

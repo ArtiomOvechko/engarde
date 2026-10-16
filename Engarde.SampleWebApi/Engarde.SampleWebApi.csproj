@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.7"/>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <EngardeWeaverPath>$(MSBuildThisFileDirectory)../Engarde.Weaver/bin/$(Configuration)/net8.0/Engarde.Weaver.dll</EngardeWeaverPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Engarde/Engarde.csproj" />
+        <ProjectReference Include="../Engarde.Generators/Engarde.Generators.csproj"
+                          OutputItemType="Analyzer"
+                          ReferenceOutputAssembly="false" />
+    </ItemGroup>
+
+    <Import Project="../Engarde/build/Engarde.targets" />
+
+</Project>

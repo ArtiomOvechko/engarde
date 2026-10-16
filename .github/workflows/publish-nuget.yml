@@ -1,0 +1,95 @@
+name: Publish NuGet packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version, without a leading v
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: nuget-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${MANUAL_VERSION}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid package version: ${version}" >&2
+            exit 1
+          fi
+
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore
+        run: dotnet restore Engarde.sln
+
+      - name: Test
+        run: dotnet test Engarde.Tests/Engarde.Tests.csproj --configuration Release --no-restore
+
+      - name: Pack
+        run: |
+          dotnet pack Engarde/Engarde.csproj \
+            --configuration Release \
+            --no-restore \
+            --output artifacts \
+            -p:PackageVersion=${{ steps.version.outputs.value }}
+          dotnet pack Engarde.Testing/Engarde.Testing.csproj \
+            --configuration Release \
+            --no-restore \
+            --output artifacts \
+            -p:PackageVersion=${{ steps.version.outputs.value }}
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-${{ steps.version.outputs.value }}
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+
+      - name: Authenticate to NuGet.org
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: artiomovechko
+
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

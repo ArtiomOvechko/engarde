@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <EngardeWeaverPath>$(MSBuildThisFileDirectory)../Engarde.Weaver/bin/$(Configuration)/net8.0/Engarde.Weaver.dll</EngardeWeaverPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+    <ProjectReference Include="../Engarde/Engarde.csproj" />
+    <ProjectReference Include="../Engarde.Generators/Engarde.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="true" />
+    <ProjectReference Include="../Engarde.Weaver/Engarde.Weaver.csproj" ReferenceOutputAssembly="true" PrivateAssets="all" />
+    <ProjectReference Include="../Engarde.Testing/Engarde.Testing.csproj" />
+    <ProjectReference Include="../Engarde.Testing.Generators/Engarde.Testing.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+  <Import Project="../Engarde/build/Engarde.targets" />
+</Project>

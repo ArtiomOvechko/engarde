@@ -1,0 +1,32 @@
+<Project>
+
+    <!--
+        Weaves [Engarde] checks into the compiled assembly. The weaver runs as a separate process,
+        so MSBuild never locks it. Set EngardeWeavingEnabled=false to skip a project.
+    -->
+    <PropertyGroup>
+        <EngardeWeaverPath Condition="'$(EngardeWeaverPath)' == ''">$(MSBuildThisFileDirectory)..\tools\weaver\Engarde.Weaver.dll</EngardeWeaverPath>
+        <EngardeDotnet Condition="'$(EngardeDotnet)' == '' and '$(DOTNET_HOST_PATH)' != ''">$(DOTNET_HOST_PATH)</EngardeDotnet>
+        <EngardeDotnet Condition="'$(EngardeDotnet)' == ''">dotnet</EngardeDotnet>
+    </PropertyGroup>
+
+    <Target Name="EngardeWeave"
+            AfterTargets="CoreCompile"
+            Condition="'$(EngardeWeavingEnabled)' != 'false' and '$(DesignTimeBuild)' != 'true'"
+            Inputs="@(IntermediateAssembly);$(EngardeWeaverPath)"
+            Outputs="$(IntermediateOutputPath)$(TargetName).engarde">
+        <!-- These paths depend on properties initialized after package targets are imported. -->
+        <PropertyGroup>
+            <EngardeReferencesFile>$(IntermediateOutputPath)$(TargetName).engarde.references</EngardeReferencesFile>
+            <EngardeMarkerFile>$(IntermediateOutputPath)$(TargetName).engarde</EngardeMarkerFile>
+        </PropertyGroup>
+        <WriteLinesToFile File="$(EngardeReferencesFile)" Lines="@(ReferencePath->'%(FullPath)')" Overwrite="true" WriteOnlyWhenDifferent="true" />
+        <Exec Command="&quot;$(EngardeDotnet)&quot; &quot;$(EngardeWeaverPath)&quot; &quot;@(IntermediateAssembly->'%(FullPath)')&quot; &quot;$(EngardeReferencesFile)&quot;"
+              StandardOutputImportance="low" />
+        <Touch Files="$(EngardeMarkerFile)" AlwaysCreate="true" />
+        <ItemGroup>
+            <FileWrites Include="$(EngardeReferencesFile);$(EngardeMarkerFile)" />
+        </ItemGroup>
+    </Target>
+
+</Project>

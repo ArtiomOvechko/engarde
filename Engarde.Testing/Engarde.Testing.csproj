@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Authors>Artem Ovechko</Authors>
+    <PackageId>Engarde.Testing</PackageId>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <Version>1.0.0</Version>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>Compile-time generated guard overrides for Engarde tests.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Engarde/Engarde.csproj" />
+    <ProjectReference Include="../Engarde.Testing.Generators/Engarde.Testing.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+  <Target Name="IncludeTestingGeneratorInPackage" BeforeTargets="_GetPackageFiles">
+    <ItemGroup>
+      <None Include="../Engarde.Testing.Generators/bin/$(Configuration)/netstandard2.0/Engarde.Testing.Generators.dll"
+            Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    </ItemGroup>
+  </Target>
+</Project>
