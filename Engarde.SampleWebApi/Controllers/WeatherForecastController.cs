@@ -31,8 +31,8 @@ public sealed class WeatherForecastController(
     public async Task<ActionResult<string[]>> Post([FromBody] WeatherDto weatherDto)
     {
         if (
-            !await engarde.IsEnabledAsync("weatherforecast") ||
-            !await weatherPermissionGuard.IsEnabledAsync())
+            !await engarde.IsFeatureEnabledAsync("weatherforecast") ||
+            !await weatherPermissionGuard.IsFeatureEnabledAsync())
         {
             return Ok(Array.Empty<string>());
         }

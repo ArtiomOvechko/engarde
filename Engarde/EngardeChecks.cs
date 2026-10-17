@@ -183,13 +183,22 @@ public static class EngardeChecks
         if (!HasEnabledGuards(guards))
             return true;
 
-        return EngardeEvaluation.Wait((guards, value), static state => ValidateAsync(state.guards, state.value));
+        return Wait((guards, value), static state => ValidateAsync(state.guards, state.value));
     }
 
     private static async ValueTask<bool> ValidateAsync(Guards guards, object? value)
     {
-        await using var evaluation = EngardeEvaluation.Acquire();
-        return await ValidateAsync(evaluation.State, guards, value).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        return await ValidateAsync(evaluation, guards, value).ConfigureAwait(false);
+    }
+
+    private static T Wait<TState, T>(TState state, Func<TState, ValueTask<T>> operation)
+    {
+        // Attribute checks must also work on threads with a single-threaded synchronization context.
+        if (SynchronizationContext.Current is not null)
+            return Task.Run(async () => await operation(state).ConfigureAwait(false)).GetAwaiter().GetResult();
+        var task = operation(state);
+        return task.IsCompletedSuccessfully ? task.Result : task.AsTask().GetAwaiter().GetResult();
     }
 
     private static async ValueTask ValidateMethodAsync(
@@ -206,14 +215,14 @@ public static class EngardeChecks
         if (!hasEnabledGuards)
             return;
 
-        await using var evaluation = EngardeEvaluation.Acquire();
-        await ValidateAsync(evaluation.State, methodGuards, null).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        await ValidateAsync(evaluation, methodGuards, null).ConfigureAwait(false);
 
         for (var index = 0; index < arguments.Length; index++)
         {
             var value = arguments[index];
             if (!IsEmptyObject(value))
-                await ValidateAsync(evaluation.State, parameterGuards[index], value).ConfigureAwait(false);
+                await ValidateAsync(evaluation, parameterGuards[index], value).ConfigureAwait(false);
         }
     }
 
@@ -228,7 +237,7 @@ public static class EngardeChecks
                 var featureName = guard.FeatureNames[index];
                 if (!IsGuardEnabled(guard, featureName))
                     continue;
-                if (!await guard.EvaluateAsync(evaluation, featureName, guards.Member, value).ConfigureAwait(false))
+                if (!await guard.EvaluateAsync(evaluation, featureName, guards.Member, value, null).ConfigureAwait(false))
                 {
                     enabled = false;
                     context ??= evaluation.CreateContext(guards.Member, value);

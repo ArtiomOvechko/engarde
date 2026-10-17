@@ -45,14 +45,13 @@ public sealed class ClassConstructorGuardTests
     }
 
     [Fact]
-    public void Constructor_chaining_checks_each_constructor_even_when_the_result_is_cached()
+    public void Constructor_chaining_checks_each_constructor()
     {
         var gate = new Gate { ThrowOnMissing = false };
         using var services = Services(gate);
         using var active = Guard.BeginScope(services);
-        using var evaluation = Guard.BeginEvaluationScope();
         _ = new Chained();
-        Assert.Equal(1, gate.Calls);
+        Assert.Equal(2, gate.Calls);
         Assert.Equal(2, gate.Missing.Count);
         Assert.All(gate.Missing, context => AssertConstructor(context, typeof(Chained), isStatic: false));
     }
@@ -103,10 +102,9 @@ public sealed class ClassConstructorGuardTests
         var gate = new Gate { ThrowOnMissing = false };
         using var services = Services(gate);
         using var active = Guard.BeginScope(services);
-        using var evaluation = Guard.BeginEvaluationScope();
         _ = new BothConstructors();
         _ = new BothConstructors();
-        Assert.Equal(1, gate.Calls);
+        Assert.Equal(3, gate.Calls);
         Assert.Equal(new[] { ".cctor", ".ctor", ".ctor" }, gate.Missing.Select(context => context.Member.Name));
         Assert.Equal(1, Effects.Count(typeof(BothConstructors)));
     }

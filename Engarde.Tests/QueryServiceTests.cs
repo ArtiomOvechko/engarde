@@ -25,10 +25,10 @@ public sealed class QueryServiceTests
         var secondStore = second.ServiceProvider.GetRequiredService<QueryStore>();
         firstStore.Enabled = true;
         secondStore.Enabled = false;
-        Assert.True(await firstQueries.IsEnabledAsync("enabled"));
-        Assert.True(await firstCustom.IsEnabledAsync());
-        Assert.False(await second.ServiceProvider.GetRequiredService<IEngarde>().IsEnabledAsync("enabled"));
-        Assert.False(await second.ServiceProvider.GetRequiredService<IInjectedFlagGuard>().IsEnabledAsync());
+        Assert.True(await firstQueries.IsFeatureEnabledAsync("enabled"));
+        Assert.True(await firstCustom.IsFeatureEnabledAsync());
+        Assert.False(await second.ServiceProvider.GetRequiredService<IEngarde>().IsFeatureEnabledAsync("enabled"));
+        Assert.False(await second.ServiceProvider.GetRequiredService<IInjectedFlagGuard>().IsFeatureEnabledAsync());
         Assert.Equal(2, firstStore.Calls);
         Assert.Equal(2, secondStore.Calls);
         Assert.False(firstStore.Disposed);
@@ -46,7 +46,7 @@ public sealed class QueryServiceTests
         await using var scope = services.CreateAsyncScope();
         var first = scope.ServiceProvider.GetRequiredService<IFeature1PermissionGuard>();
         Assert.Same(first, scope.ServiceProvider.GetRequiredService<IFeature1PermissionGuard>());
-        Assert.True(await first.IsEnabledAsync());
+        Assert.True(await first.IsFeatureEnabledAsync());
     }
 
     [Theory]
@@ -91,16 +91,16 @@ public sealed class QueryServiceTests
         await using var services = Services(ServiceLifetime.Singleton, observations);
         var queries = services.GetRequiredService<IEngarde>();
         var custom = services.GetRequiredService<IInjectedFlagGuard>();
-        Assert.True(await queries.IsEnabledAsync("enabled"));
-        Assert.True(await queries.IsEnabledAsync("enabled"));
-        Assert.True(await custom.IsEnabledAsync());
+        Assert.True(await queries.IsFeatureEnabledAsync("enabled"));
+        Assert.True(await queries.IsFeatureEnabledAsync("enabled"));
+        Assert.True(await custom.IsFeatureEnabledAsync());
         Assert.Equal(3, observations.Count);
         Assert.Equal(3, observations.Distinct().Count());
         Assert.All(observations, store => Assert.True(store.Disposed));
     }
 
     [Fact]
-    public async Task Singleton_queries_reuse_each_requests_services_and_cache_without_retaining_them()
+    public async Task Singleton_queries_reuse_each_requests_services_without_retaining_them()
     {
         var observations = new ConcurrentQueue<QueryStore>();
         await using var services = Services(ServiceLifetime.Singleton, observations);
@@ -111,18 +111,18 @@ public sealed class QueryServiceTests
             await using var request = services.CreateAsyncScope();
             var store = request.ServiceProvider.GetRequiredService<QueryStore>();
             store.Enabled = enabled;
-            using (Guard.BeginEvaluationScope(request.ServiceProvider))
+            using (Guard.BeginScope(request.ServiceProvider, createScope: false))
             {
-                Assert.Equal(enabled, await queries.IsEnabledAsync("enabled"));
-                Assert.Equal(enabled, await custom.IsEnabledAsync());
-                Assert.Equal(enabled, await queries.IsEnabledAsync("enabled"));
-                Assert.Equal(enabled, await custom.IsEnabledAsync());
-                Assert.Equal(2, store.Calls);
+                Assert.Equal(enabled, await queries.IsFeatureEnabledAsync("enabled"));
+                Assert.Equal(enabled, await custom.IsFeatureEnabledAsync());
+                Assert.Equal(enabled, await queries.IsFeatureEnabledAsync("enabled"));
+                Assert.Equal(enabled, await custom.IsFeatureEnabledAsync());
+                Assert.Equal(4, store.Calls);
                 Assert.False(store.Disposed);
             }
             Assert.False(store.Disposed);
         }
-        Assert.Equal(4, observations.Count);
+        Assert.Equal(8, observations.Count);
         Assert.All(observations, store => Assert.True(store.Disposed));
     }
 
@@ -136,8 +136,8 @@ public sealed class QueryServiceTests
         var custom = InjectedFlagGuard.CreateInstance(scope.ServiceProvider);
         Assert.NotSame(core, Guard.CreateInstance(scope.ServiceProvider));
         Assert.NotSame(custom, InjectedFlagGuard.CreateInstance(scope.ServiceProvider));
-        Assert.True(await core.IsEnabledAsync("enabled"));
-        Assert.True(await custom.IsEnabledAsync());
+        Assert.True(await core.IsFeatureEnabledAsync("enabled"));
+        Assert.True(await custom.IsFeatureEnabledAsync());
         Assert.Equal(2, store.Calls);
         Assert.False(store.Disposed);
     }
@@ -151,22 +151,22 @@ public sealed class QueryServiceTests
         Assert.NotSame(custom, InjectedFlagGuard.CreateInstance());
         await using var services = Services();
         using var active = Guard.BeginScope(services);
-        Assert.True(await queries.IsEnabledAsync("enabled"));
-        Assert.True(await custom.IsEnabledAsync());
+        Assert.True(await queries.IsFeatureEnabledAsync("enabled"));
+        Assert.True(await custom.IsFeatureEnabledAsync());
     }
 
     [Fact]
-    public async Task Bound_query_services_do_not_use_another_containers_ambient_results()
+    public async Task Bound_query_services_do_not_use_another_containers_active_scope()
     {
         await using var first = Services();
         await using var second = Services();
         await using var firstScope = first.CreateAsyncScope();
         await using var secondScope = second.CreateAsyncScope();
         secondScope.ServiceProvider.GetRequiredService<QueryStore>().Enabled = false;
-        using var evaluation = Guard.BeginEvaluationScope(firstScope.ServiceProvider);
-        Assert.True(await firstScope.ServiceProvider.GetRequiredService<IEngarde>().IsEnabledAsync("enabled"));
-        Assert.False(await secondScope.ServiceProvider.GetRequiredService<IEngarde>().IsEnabledAsync("enabled"));
-        Assert.False(await secondScope.ServiceProvider.GetRequiredService<IInjectedFlagGuard>().IsEnabledAsync());
+        using var active = Guard.BeginScope(firstScope.ServiceProvider, createScope: false);
+        Assert.True(await firstScope.ServiceProvider.GetRequiredService<IEngarde>().IsFeatureEnabledAsync("enabled"));
+        Assert.False(await secondScope.ServiceProvider.GetRequiredService<IEngarde>().IsFeatureEnabledAsync("enabled"));
+        Assert.False(await secondScope.ServiceProvider.GetRequiredService<IInjectedFlagGuard>().IsFeatureEnabledAsync());
     }
 
     [Fact]
@@ -198,13 +198,13 @@ public sealed class QueryStore(ConcurrentQueue<QueryStore>? observations = null)
     public ValueTask DisposeAsync() { Disposed = true; return default; }
 }
 
+[SkipInlineFailures]
 public sealed partial class InjectedFlagGuard() : EngardeAttribute<QueryStore>("enabled")
 {
-    protected override object CacheKey => GetType();
     protected override ValueTask<bool> IsEnabledAsync(QueryStore store, string featureName) => store.Check(featureName);
 }
 
 public sealed class CustomInjectedFlagGuard : IInjectedFlagGuard
 {
-    public ValueTask<bool> IsEnabledAsync() => ValueTask.FromResult(true);
+    public ValueTask<bool> IsFeatureEnabledAsync() => ValueTask.FromResult(true);
 }

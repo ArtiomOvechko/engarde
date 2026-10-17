@@ -11,7 +11,7 @@ namespace Tests;
 public sealed class RequestEvaluationTests
 {
     [Fact]
-    public async Task Middleware_reuses_request_services_and_shares_inline_and_woven_results()
+    public async Task Middleware_reuses_request_services_for_inline_and_woven_checks()
     {
         var calls = new ConcurrentQueue<(RequestStore Store, int Id)>();
         var missing = new List<EngardeContext>();
@@ -24,10 +24,10 @@ public sealed class RequestEvaluationTests
             var store = context.RequestServices.GetRequiredService<RequestStore>();
             var engarde = context.RequestServices.GetRequiredService<IEngarde>();
             user.Id = 7;
-            Assert.True(await engarde.IsEnabledAsync("enabled"));
+            Assert.True(await engarde.IsFeatureEnabledAsync("enabled"));
             await Task.Yield();
             RequestMembers.Enabled();
-            Assert.True(await engarde.IsEnabledAsync("enabled"));
+            Assert.True(await engarde.IsFeatureEnabledAsync("enabled"));
             RequestMembers.Disabled();
             RequestMembers.Disabled();
             Assert.Same(user, store.User);
@@ -38,8 +38,8 @@ public sealed class RequestEvaluationTests
         var user = request.ServiceProvider.GetRequiredService<RequestUser>();
         await app.Build()(new DefaultHttpContext { RequestServices = request.ServiceProvider });
 
-        Assert.Equal(2, calls.Count); // One store call for each flag.
-        Assert.Equal(2, missing.Count); // The cached false still invokes each operation's handler.
+        Assert.Equal(5, calls.Count); // One store call for each check.
+        Assert.Equal(2, missing.Count);
         Assert.All(calls, item => { Assert.Same(user, item.Store.User); Assert.Equal(7, item.Id); });
         Assert.False(user.Disposed);
         await request.DisposeAsync();
@@ -47,7 +47,7 @@ public sealed class RequestEvaluationTests
     }
 
     [Fact]
-    public async Task Concurrent_requests_have_separate_results_and_the_next_request_refreshes_them()
+    public async Task Concurrent_requests_use_their_own_services()
     {
         var calls = new ConcurrentQueue<(RequestStore Store, int Id)>();
         await using var services = Services(calls, []);
@@ -60,11 +60,11 @@ public sealed class RequestEvaluationTests
             var user = context.RequestServices.GetRequiredService<RequestUser>();
             var engarde = context.RequestServices.GetRequiredService<IEngarde>();
             user.Id = (int)context.Items["id"]!;
-            var enabled = await engarde.IsEnabledAsync("enabled");
+            var enabled = await engarde.IsFeatureEnabledAsync("enabled");
             if (Interlocked.Increment(ref arrivals) == 2) bothArrived.TrySetResult();
             await bothArrived.Task;
             Assert.Equal(user.Id == 7, enabled);
-            Assert.Equal(enabled, await engarde.IsEnabledAsync("enabled"));
+            Assert.Equal(enabled, await engarde.IsFeatureEnabledAsync("enabled"));
         });
         var pipeline = app.Build();
         async Task Request(int id)
@@ -77,24 +77,21 @@ public sealed class RequestEvaluationTests
 
         await Task.WhenAll(Request(7), Request(8)).WaitAsync(TimeSpan.FromSeconds(10));
         await Request(7);
-        Assert.Equal(3, calls.Count);
+        Assert.Equal(6, calls.Count);
         Assert.Equal(3, calls.Select(item => item.Store).Distinct().Count());
         Assert.All(calls, item => Assert.True(item.Store.User.Disposed));
     }
 
     [Fact]
-    public async Task Pipeline_exceptions_end_the_cache_without_disposing_request_services()
+    public async Task Pipeline_exceptions_do_not_dispose_request_services()
     {
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task<bool>? escaped = null;
         await using var services = Services(new(), []);
         var app = new ApplicationBuilder(services);
         app.UseEngarde();
         app.Run(async context =>
         {
             var engarde = context.RequestServices.GetRequiredService<IEngarde>();
-            Assert.True(await engarde.IsEnabledAsync("enabled"));
-            escaped = Task.Run(async () => { await release.Task; return await engarde.IsEnabledAsync("enabled"); });
+            Assert.True(await engarde.IsFeatureEnabledAsync("enabled"));
             throw new InvalidOperationException("endpoint failed");
         });
 
@@ -103,12 +100,10 @@ public sealed class RequestEvaluationTests
         user.Id = 7;
         await Assert.ThrowsAsync<InvalidOperationException>(() => app.Build()(new DefaultHttpContext { RequestServices = request.ServiceProvider }));
         Assert.False(user.Disposed);
-        release.SetResult();
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => escaped!);
     }
 
     [Fact]
-    public async Task Borrowed_services_support_nested_scopes_and_restore_the_outer_cache()
+    public async Task Borrowed_services_support_nested_scopes_and_restore_the_outer_services()
     {
         var calls = new ConcurrentQueue<(RequestStore Store, int Id)>();
         await using var services = Services(calls, []);
@@ -116,20 +111,20 @@ public sealed class RequestEvaluationTests
         await using var second = services.CreateAsyncScope();
         first.ServiceProvider.GetRequiredService<RequestUser>().Id = 7;
         second.ServiceProvider.GetRequiredService<RequestUser>().Id = 8;
-        using (Guard.BeginEvaluationScope(first.ServiceProvider))
+        using (Guard.BeginScope(first.ServiceProvider, createScope: false))
         {
-            Assert.True(await Guard.CreateInstance().IsEnabledAsync("enabled"));
-            using (Guard.BeginEvaluationScope(second.ServiceProvider))
-                Assert.False(await Guard.CreateInstance().IsEnabledAsync("enabled"));
-            Assert.True(await Guard.CreateInstance().IsEnabledAsync("enabled"));
+            Assert.True(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
+            using (Guard.BeginScope(second.ServiceProvider, createScope: false))
+                Assert.False(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
+            Assert.True(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
         }
-        Assert.Equal(2, calls.Count);
+        Assert.Equal(new[] { 7, 8, 7 }, calls.Select(call => call.Id));
         Assert.False(first.ServiceProvider.GetRequiredService<RequestUser>().Disposed);
         Assert.False(second.ServiceProvider.GetRequiredService<RequestUser>().Disposed);
     }
 
     [Fact]
-    public async Task BeginScope_and_parameterless_evaluation_borrow_the_existing_scope()
+    public async Task BeginScope_borrows_the_existing_scope()
     {
         var calls = new ConcurrentQueue<(RequestStore Store, int Id)>();
         await using var services = Services(calls, []);
@@ -138,8 +133,7 @@ public sealed class RequestEvaluationTests
         user.Id = 8;
 
         using var active = Guard.BeginScope(request.ServiceProvider);
-        using var evaluation = Guard.BeginEvaluationScope();
-        Assert.False(await Guard.CreateInstance().IsEnabledAsync("enabled"));
+        Assert.False(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
 
         var call = Assert.Single(calls);
         Assert.Equal(8, call.Id);
@@ -148,7 +142,7 @@ public sealed class RequestEvaluationTests
     }
 
     [Fact]
-    public async Task Switching_BeginScope_does_not_reuse_the_previous_providers_evaluation()
+    public async Task Switching_BeginScope_uses_the_new_provider_until_disposed()
     {
         var calls = new ConcurrentQueue<(RequestStore Store, int Id)>();
         await using var services = Services(calls, []);
@@ -158,15 +152,14 @@ public sealed class RequestEvaluationTests
         second.ServiceProvider.GetRequiredService<RequestUser>().Id = 8;
 
         using (Guard.BeginScope(first.ServiceProvider))
-        using (Guard.BeginEvaluationScope())
         {
-            Assert.True(await Guard.CreateInstance().IsEnabledAsync("enabled"));
+            Assert.True(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
             using (Guard.BeginScope(second.ServiceProvider))
-                Assert.False(await Guard.CreateInstance().IsEnabledAsync("enabled"));
-            Assert.True(await Guard.CreateInstance().IsEnabledAsync("enabled"));
+                Assert.False(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
+            Assert.True(await Guard.CreateInstance().IsFeatureEnabledAsync("enabled"));
         }
 
-        Assert.Equal(new[] { 7, 8 }, calls.Select(call => call.Id));
+        Assert.Equal(new[] { 7, 8, 7 }, calls.Select(call => call.Id));
     }
 
     private static ServiceProvider Services(ConcurrentQueue<(RequestStore Store, int Id)> calls, List<EngardeContext> missing) =>
