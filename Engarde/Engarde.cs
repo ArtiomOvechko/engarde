@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Engarde;
@@ -5,6 +6,7 @@ namespace Engarde;
 /// <summary>Inline feature queries using the same configuration as attribute guards.</summary>
 public sealed partial class Engarde : IEngarde
 {
+    private static readonly ConcurrentDictionary<Type, bool> SkipInlineFailuresCache = new();
     private readonly IServiceProvider? _queryServices;
     private readonly bool _createScopePerCall;
 
@@ -14,7 +16,7 @@ public sealed partial class Engarde : IEngarde
         _createScopePerCall = createScopePerCall;
     }
 
-    /// <summary>Creates a query service using the active application or evaluation scope when called.</summary>
+    /// <summary>Creates a query service using the services activated with BeginScope or Activate when called.</summary>
     public static Engarde CreateInstance() => new(null, false);
 
     /// <summary>
@@ -34,38 +36,67 @@ public sealed partial class Engarde : IEngarde
             throw new ArgumentOutOfRangeException(nameof(lifetime));
     }
 
-    public async ValueTask<bool> IsEnabledAsync(string featureFlagName)
+    /// <summary>
+    /// Evaluates a feature with the registered feature store and feature scope id;
+    /// </summary>
+    public async ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName)
     {
         ValidateFeatureName(featureFlagName, nameof(featureFlagName));
-        return await EngardeEvaluation.QueryAsync(featureFlagName, _queryServices, _createScopePerCall).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin(_queryServices, _createScopePerCall);
+        return await evaluation.DefaultAsync(featureFlagName).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Evaluates the feature names encapsulated by a guard using its configured store and scope.
-    /// Returns true only when all its features are enabled; does not invoke the missing-feature handler.
+    /// Returns true only when all its features are enabled.
     /// </summary>
-    public async ValueTask<bool> IsEnabledAsync(EngardeAttribute guard)
+    public ValueTask<bool> IsFeatureEnabledAsync(EngardeAttribute guard) => QueryAsync(guard, null, null);
+
+    /// <summary>Evaluates a feature with a custom guard; see <see cref="IsFeatureEnabledAsync(EngardeAttribute)"/>.</summary>
+    public ValueTask<bool> IsFeatureEnabledAsync(EngardeAttribute guard, string featureFlagName)
+    {
+        ValidateFeatureName(featureFlagName, nameof(featureFlagName));
+        return QueryAsync(guard, featureFlagName, null);
+    }
+
+    /// <summary>
+    /// Evaluates the guard's features for the given feature scope id instead of resolving one.
+    /// <typeparamref name="TFeatureScopeId"/> must match the guard's feature scope id, or the registered store's.
+    /// </summary>
+    public ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(EngardeAttribute guard, TFeatureScopeId scopeId) =>
+        QueryAsync(guard, null, new ScopeIdOverride(scopeId));
+
+    /// <summary>Evaluates a feature with a custom guard for the given feature scope id instead of resolving one.</summary>
+    public ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(EngardeAttribute guard, string featureFlagName, TFeatureScopeId scopeId)
+    {
+        ValidateFeatureName(featureFlagName, nameof(featureFlagName));
+        return QueryAsync(guard, featureFlagName, new ScopeIdOverride(scopeId));
+    }
+
+    private async ValueTask<bool> QueryAsync(EngardeAttribute guard, string? featureFlagName, ScopeIdOverride? scopeId)
     {
         if (guard is null) throw new ArgumentNullException(nameof(guard));
-        await using var evaluation = EngardeEvaluation.Acquire(_queryServices, _createScopePerCall);
+        var guardType = guard.GetType();
+        var featureNames = featureFlagName is null ? guard.FeatureNames : [featureFlagName];
+        await using var evaluation = EngardeEvaluation.Begin(_queryServices, _createScopePerCall);
         var enabled = true;
-        for (var index = 0; index < guard.FeatureNames.Count; index++)
+        EngardeContext? context = null;
+        foreach (var featureName in featureNames)
         {
-            var featureName = guard.FeatureNames[index];
             ValidateFeatureName(featureName, nameof(guard));
-            enabled &= await guard.EvaluateAsync(evaluation.State, featureName, guard.GetType(), null).ConfigureAwait(false);
+            if (await guard.EvaluateAsync(evaluation, featureName, guardType, null, scopeId).ConfigureAwait(false))
+                continue;
+            enabled = false;
+            if (SkipsInlineFailures(guardType))
+                continue;
+            context ??= evaluation.CreateContext(guardType, null, scopeId);
+            guard.OnFeatureMissing(featureName, context);
         }
         return enabled;
     }
 
-    /// <summary>Evaluates a custom guard without invoking its missing-feature handler.</summary>
-    public async ValueTask<bool> IsEnabledAsync(EngardeAttribute guard, string featureFlagName)
-    {
-        if (guard is null) throw new ArgumentNullException(nameof(guard));
-        ValidateFeatureName(featureFlagName, nameof(featureFlagName));
-        await using var evaluation = EngardeEvaluation.Acquire(_queryServices, _createScopePerCall);
-        return await guard.EvaluateAsync(evaluation.State, featureFlagName, guard.GetType(), null).ConfigureAwait(false);
-    }
+    private static bool SkipsInlineFailures(Type guardType) => SkipInlineFailuresCache.GetOrAdd(guardType,
+        static type => type.IsDefined(typeof(SkipInlineFailuresAttribute), inherit: true));
 
     private static void ValidateFeatureName(string featureName, string parameterName)
     {

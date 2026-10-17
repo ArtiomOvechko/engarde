@@ -8,21 +8,28 @@ public sealed class EngardeContext
     private readonly EngardeConfiguration? _configuration;
     private readonly EngardeEvaluation _evaluation;
 
-    internal EngardeContext(EngardeConfiguration? configuration, IServiceProvider services, MemberInfo member, object? value, EngardeEvaluation evaluation)
+    internal EngardeContext(EngardeConfiguration? configuration, IServiceProvider? services, MemberInfo member, object? value,
+        EngardeEvaluation evaluation, ScopeIdOverride? scopeIdOverride = null)
     {
         _configuration = configuration;
         _evaluation = evaluation;
-        Services = services;
+        ScopeIdOverride = scopeIdOverride;
+        OptionalServices = services;
         Member = member;
         Value = value;
     }
 
     /// <summary>
-    /// Scoped services for this evaluation. Owned evaluation services end with the evaluation;
-    /// borrowed request services remain owned by the HTTP request. A self-contained guard running without
-    /// <c>AddEngarde</c> receives an empty provider.
+    /// Scoped services for this check. A child scope created for the check ends with it; borrowed request services
+    /// remain owned by the HTTP request. Throws when guards run without <c>AddEngarde</c>.
     /// </summary>
-    public IServiceProvider Services { get; }
+    public IServiceProvider Services => OptionalServices ?? throw NoServices();
+
+    /// <summary>The services for this check, or null when guards run without <c>AddEngarde</c></summary>
+    internal IServiceProvider? OptionalServices { get; }
+
+    internal static InvalidOperationException NoServices() =>
+        new("Feature guards have no services, register them with AddEngarde");
 
     /// <summary>
     /// The guarded method, constructor, property, field or method of a guarded parameter; the guard type for inline queries
@@ -35,11 +42,16 @@ public sealed class EngardeContext
     /// </summary>
     public object? Value { get; }
 
+    /// <summary>The feature scope id passed to an inline query, used instead of resolving one</summary>
+    internal ScopeIdOverride? ScopeIdOverride { get; }
+
     internal T GetRequiredService<T>() where T : notnull => Services.GetRequiredService<T>();
 
     internal async ValueTask<bool> IsEnabledByDefaultAsync(string featureName, EngardeAttribute guard)
     {
         var store = RequiredConfiguration.FeatureStore;
+        if (ScopeIdOverride is not null && store.ScopeIdType is null)
+            throw new InvalidOperationException("The registered feature store evaluates features without a feature scope id");
         var scopeId = store.ScopeIdType is null ? null : await GetFeatureScopeIdAsync(guard, store);
 
         return await _evaluation.CheckStoreAsync(store, featureName, scopeId).ConfigureAwait(false);
@@ -54,8 +66,9 @@ public sealed class EngardeContext
     {
         if (guard.GetFeatureScopeId(this) is not { } custom)
         {
-            return await _evaluation.ScopeIdAsync(new EngardeEvaluation.ScopeKey(store), (store, Services),
-                static state => state.store.ScopeIdFactory!(state.Services)).ConfigureAwait(false);
+            if (ScopeIdOverride is not null)
+                return ScopeIdOverride.Get(store.ScopeIdType!, guard.GetType());
+            return await store.ScopeIdFactory!(Services).ConfigureAwait(false);
         }
 
         if (custom.Type != store.ScopeIdType)
@@ -63,17 +76,10 @@ public sealed class EngardeContext
             throw new InvalidOperationException(
                 $"{guard.GetType().Name} provides a {custom.Type.Name} feature scope id, but the feature store expects {store.ScopeIdType!.Name}");
         }
+        if (ScopeIdOverride is not null)
+            return ScopeIdOverride.Get(custom.Type, guard.GetType());
 
-        return await GetOrAddFeatureScopeIdAsync(guard, custom.Resolve);
-    }
-
-    /// <summary>
-    /// Resolves an attribute's own feature scope id once per evaluation scope and cache key
-    /// </summary>
-    internal async ValueTask<object?> GetOrAddFeatureScopeIdAsync(EngardeAttribute guard, Func<ValueTask<object?>> resolve)
-    {
-        return await _evaluation.ScopeIdAsync(new EngardeEvaluation.ScopeKey(guard.GetType(), guard.EvaluationCacheKey),
-            resolve, static action => action()).ConfigureAwait(false);
+        return await custom.Resolve();
     }
 
     private EngardeConfiguration RequiredConfiguration => _configuration

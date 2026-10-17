@@ -8,6 +8,7 @@ public sealed partial class EditWeatherGuard() : EngardeAttribute("weatherforeca
     }
 }
 
+[SkipInlineFailures]
 [GenerateFeatureGuards("weather", "editweather")]
 public partial class PermissionGuard : EngardeAttribute
 {

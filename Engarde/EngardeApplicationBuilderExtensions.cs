@@ -4,9 +4,9 @@ namespace Microsoft.AspNetCore.Builder;
 public static class EngardeApplicationBuilderExtensions
 {
     /// <summary>
-    /// Shares feature evaluations across the request using HttpContext.RequestServices.
+    /// Evaluates features in the request with HttpContext.RequestServices.
     /// Place after authentication/tenant resolution and before guarded middleware or endpoints.
-    /// The evaluation cache ends when the downstream pipeline finishes, including on exceptions;
+    /// The request services stop being used when the downstream pipeline finishes, including on exceptions;
     /// ASP.NET Core retains ownership of request services.
     /// </summary>
     public static IApplicationBuilder UseEngarde(this IApplicationBuilder app)
@@ -14,7 +14,7 @@ public static class EngardeApplicationBuilderExtensions
         if (app is null) throw new ArgumentNullException(nameof(app));
         return app.Use(static next => async context =>
         {
-            using var evaluation = global::Engarde.Engarde.BeginEvaluationScope(context.RequestServices);
+            using var scope = global::Engarde.Engarde.BeginScope(context.RequestServices, createScope: false);
             await next(context).ConfigureAwait(false);
         });
     }

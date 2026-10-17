@@ -17,8 +17,8 @@ public sealed partial class Engarde
     }
 
     /// <summary>
-    /// Activates guards for the current async flow only until disposed (e.g. in tests).
-    /// A Microsoft DI root provider creates an owned child scope; an existing scoped provider is borrowed.
+    /// Activates guards for the current async flow only until disposed (e.g. in tests or per request).
+    /// A Microsoft DI root provider gets a child scope per check; an existing scoped provider is borrowed.
     /// </summary>
     public static IDisposable BeginScope(IServiceProvider services)
     {
@@ -39,32 +39,6 @@ public sealed partial class Engarde
         ScopedServices.Value = new(services, createScope);
 
         return new Scope(() => ScopedServices.Value = previous);
-    }
-
-    /// <summary>
-    /// Reuses scoped services, resolved scope IDs and feature results across inline and woven checks
-    /// in the current async flow until disposed. Start a new scope for a fresh status snapshot.
-    /// </summary>
-    public static IDisposable BeginEvaluationScope() => EngardeEvaluation.Begin();
-
-    /// <summary>
-    /// Reuses an existing DI scope's services for an evaluation session. The caller owns the services;
-    /// disposing this session ends its cache without disposing the supplied service provider.
-    /// </summary>
-    public static IDisposable BeginEvaluationScope(IServiceProvider services)
-    {
-        if (services is null) throw new ArgumentNullException(nameof(services));
-        return EngardeEvaluation.Begin(services);
-    }
-
-    internal static (IServiceProvider Services, EngardeConfiguration Configuration) Current
-    {
-        get
-        {
-            return TryGetCurrent(out var current)
-                ? (current.Services, current.Configuration)
-                : throw new InvalidOperationException("Feature guards are not active, register them with AddEngarde");
-        }
     }
 
     internal static bool TryGetCurrent(out ActiveServices current)
@@ -94,12 +68,6 @@ public sealed partial class Engarde
 
         services = new(scoped.Services, scoped.Services.GetRequiredService<EngardeConfiguration>(), scoped.CreateScope);
         return true;
-    }
-
-    internal static bool TryGetGlobalServices(out IServiceProvider services)
-    {
-        services = _services!;
-        return services is not null;
     }
 
     internal readonly record struct ActiveServices(

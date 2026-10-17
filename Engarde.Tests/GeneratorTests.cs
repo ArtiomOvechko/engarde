@@ -2,24 +2,121 @@ using Engarde;
 using Engarde.Generators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Xunit;
 
 namespace Tests;
 
 public sealed class GeneratorTests
 {
-    private static (GeneratorDriverRunResult Result, Compilation Output) Generate(string declaration)
+    private static CSharpCompilation Compile(string declaration)
     {
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
             .Select(path => MetadataReference.CreateFromFile(path)).ToList();
         references.Add(MetadataReference.CreateFromFile(typeof(EngardeAttribute).Assembly.Location));
-        var compilation = CSharpCompilation.Create("GeneratorConsumer",
+        return CSharpCompilation.Create("GeneratorConsumer",
             [CSharpSyntaxTree.ParseText("using Engarde;\n" + declaration)], references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+    }
+
+    private static (GeneratorDriverRunResult Result, Compilation Output) Generate(string declaration)
+    {
         GeneratorDriver driver = CSharpGeneratorDriver.Create(new GuardGenerator());
-        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var output, out _);
+        driver = driver.RunGeneratorsAndUpdateCompilation(Compile(declaration), out var output, out _);
         return (driver.GetRunResult(), output);
     }
+
+    [Fact]
+    public void Generates_scope_id_overloads_for_guards_with_their_own_scope_id_type()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            public sealed class Tenant;
+            public abstract class TenantGuard(params string[] featureNames) : EngardeAttribute<Tenant, string>(featureNames)
+            {
+                protected override System.Threading.Tasks.ValueTask<string> GetFeatureScopeIdAsync(Tenant tenant) => new("tenant");
+            }
+            public sealed partial class SettingsGuard() : TenantGuard("settings");
+            public sealed partial class RuntimeGuard(params string[] featureNames) : TenantGuard(featureNames);
+            public sealed partial class PlainGuard() : EngardeAttribute("plain");
+            public sealed partial class OverlapGuard : EngardeAttribute<Tenant, int>
+            {
+                public OverlapGuard() : base("overlap") { }
+                public OverlapGuard(int level) : base("overlap") { }
+                protected override System.Threading.Tasks.ValueTask<int> GetFeatureScopeIdAsync(Tenant tenant) => new(1);
+            }
+            public static class Caller
+            {
+                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync() =>
+                    await SettingsGuard.CreateInstance().IsFeatureEnabledAsync("tenant")
+                    && await RuntimeGuard.CreateInstance().IsFeatureEnabledAsync("flag", "tenant")
+                    && await OverlapGuard.CreateInstance().IsFeatureEnabledAsync(1, 2);
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .ToDictionary(contract => contract.Identifier.ValueText, contract => contract.Members
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .Select(method => string.Join(",", method.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText)))
+                .ToArray());
+        Assert.Equal(new[] { "", "scopeId" }, contracts["ISettingsGuard"]);
+        Assert.Equal(new[] { "featureFlagName", "featureFlagName,scopeId" }, contracts["IRuntimeGuard"]);
+        Assert.Equal(new[] { "" }, contracts["IPlainGuard"]);
+        // A constructor query takes precedence over a scope overload with the same signature
+        Assert.Equal(new[] { "", "level", "level,scopeId" }, contracts["IOverlapGuard"]);
+        // A string scope id must not bind to the feature name overload
+        Assert.Contains(result.GeneratedTrees, tree => tree.ToString().Contains("IsFeatureEnabledAsync<string>(new global::Consumer.SettingsGuard(), scopeId)"));
+    }
+
+    [Fact]
+    public async Task Suppresses_attribute_conventions_for_guards_only()
+    {
+        var compilation = Compile("""
+            public sealed class AccessGuard() : EngardeAttribute("access");
+            public abstract class TenantGuard() : EngardeAttribute<object, string>("tenant");
+            public sealed class Marker : System.Attribute;
+            """);
+        var diagnostics = await compilation.WithAnalyzers(
+                [new AttributeConventionAnalyzer(), new GuardDiagnosticSuppressor()],
+                new CompilationWithAnalyzersOptions(
+                    new AnalyzerOptions([]), null, false, false, reportSuppressedDiagnostics: true))
+            .GetAnalyzerDiagnosticsAsync();
+
+        Assert.Equal(6, diagnostics.Length);
+        Assert.All(diagnostics, diagnostic => Assert.Equal(
+            !diagnostic.GetMessage().Contains("Marker"), diagnostic.IsSuppressed));
+    }
+
+    // Stands in for SonarAnalyzer's S3376 (Attribute suffix) and S3993 (AttributeUsage) rules; it only runs in this test
+#pragma warning disable RS1036, RS2008
+    [DiagnosticAnalyzer(LanguageNames.CSharp)]
+    private sealed class AttributeConventionAnalyzer : DiagnosticAnalyzer
+    {
+        private static readonly DiagnosticDescriptor Suffix = new("S3376", "Suffix", "{0} needs the Attribute suffix", "Naming", DiagnosticSeverity.Warning, true);
+        private static readonly DiagnosticDescriptor Usage = new("S3993", "Usage", "{0} needs AttributeUsage", "Design", DiagnosticSeverity.Warning, true);
+
+        public override System.Collections.Immutable.ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Suffix, Usage];
+
+        public override void Initialize(AnalysisContext context)
+        {
+            context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
+            context.EnableConcurrentExecution();
+            context.RegisterSymbolAction(symbol =>
+            {
+                var type = (INamedTypeSymbol)symbol.Symbol;
+                for (var parent = type.BaseType; parent is not null; parent = parent.BaseType)
+                {
+                    if (parent.ToDisplayString() != "System.Attribute") continue;
+                    symbol.ReportDiagnostic(Diagnostic.Create(Suffix, type.Locations[0], type.Name));
+                    symbol.ReportDiagnostic(Diagnostic.Create(Usage, type.Locations[0], type.Name));
+                }
+            }, SymbolKind.NamedType);
+        }
+    }
+#pragma warning restore RS1036, RS2008
 
     [Fact]
     public void Generates_compilable_overloads_for_primary_and_regular_constructors()
@@ -37,9 +134,9 @@ public sealed class GeneratorTests
             }
             public static class Caller
             {
-                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync() => await Guard.CreateInstance().IsEnabledAsync(1, "flag")
-                    && await FixedGuard.CreateInstance().IsEnabledAsync(2) && await SingleFlagGuard.CreateInstance().IsEnabledAsync("flag") && await DefaultGuard.CreateInstance().IsEnabledAsync()
-                    && await Outer<int>.Nested<string>.CreateInstance().IsEnabledAsync(null, "flag") && await PoolGuard.CreateInstance().IsEnabledAsync("pool");
+                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync() => await Guard.CreateInstance().IsFeatureEnabledAsync(1, "flag")
+                    && await FixedGuard.CreateInstance().IsFeatureEnabledAsync(2) && await SingleFlagGuard.CreateInstance().IsFeatureEnabledAsync("flag") && await DefaultGuard.CreateInstance().IsFeatureEnabledAsync()
+                    && await Outer<int>.Nested<string>.CreateInstance().IsFeatureEnabledAsync(null, "flag") && await PoolGuard.CreateInstance().IsFeatureEnabledAsync("pool");
             }
             """);
         Assert.Empty(result.Diagnostics);
@@ -49,11 +146,11 @@ public sealed class GeneratorTests
         foreach (var tree in guardTrees)
         {
             var methods = tree.GetRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
-                .Where(method => method.Identifier.ValueText == "IsEnabledAsync").ToArray();
+                .Where(method => method.Identifier.ValueText == "IsFeatureEnabledAsync").ToArray();
             Assert.NotEmpty(methods);
             Assert.All(methods, method =>
             {
-                Assert.Equal("IsEnabledAsync", method.Identifier.ValueText);
+                Assert.Equal("IsFeatureEnabledAsync", method.Identifier.ValueText);
                 Assert.Equal("global::System.Threading.Tasks.ValueTask<bool>", method.ReturnType.ToString());
                 Assert.DoesNotContain(method.Modifiers, modifier => modifier.ValueText == "static");
             });
@@ -165,7 +262,7 @@ public sealed class GeneratorTests
                 public static IFeature1PermissionGuard First => Feature1PermissionGuard.CreateInstance();
                 public static IFeatureTwoPermissionGuard Second => FeatureTwoPermissionGuard.CreateInstance();
                 public static async System.Threading.Tasks.ValueTask<bool> Check() =>
-                    await First.IsEnabledAsync(1) && await Second.IsEnabledAsync(2);
+                    await First.IsFeatureEnabledAsync(1) && await Second.IsFeatureEnabledAsync(2);
             }
             """);
 
@@ -219,7 +316,7 @@ public sealed class GeneratorTests
             .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>().Single();
         var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
         Assert.Equal("IEngarde", contract.Identifier.ValueText);
-        Assert.Equal("IsEnabledAsync", method.Identifier.ValueText);
+        Assert.Equal("IsFeatureEnabledAsync", method.Identifier.ValueText);
         Assert.Equal("string featureFlagName", Assert.Single(method.ParameterList.Parameters).ToString());
         Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
     }
@@ -241,7 +338,7 @@ public sealed class GeneratorTests
             public partial class Outer<T> where T : class, System.IDisposable, new()
             {
                 private sealed partial class Hidden<U>(U setting) : EngardeAttribute("fixed") where U : unmanaged;
-                public static System.Threading.Tasks.ValueTask<bool> Query() => Hidden<int>.CreateInstance().IsEnabledAsync(7);
+                public static System.Threading.Tasks.ValueTask<bool> Query() => Hidden<int>.CreateInstance().IsFeatureEnabledAsync(7);
             }
             """);
         Assert.Empty(result.Diagnostics);

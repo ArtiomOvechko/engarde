@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Engarde;
@@ -33,8 +32,6 @@ namespace Engarde;
     Inherited = false)]
 public class EngardeAttribute(params string[] featureNames) : Attribute
 {
-    private static readonly ConditionalWeakTable<EngardeAttribute, CachedKey> CacheKeys = new();
-    private sealed class CachedKey(object value) { internal object Value { get; } = value; }
     public virtual IReadOnlyList<string> FeatureNames { get; } = featureNames;
 
     /// <summary>
@@ -48,6 +45,7 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
     /// <summary>
     /// Called for each disabled feature. Throwing blocks a method or parameter guard; returning lets that call proceed.
     /// A disabled property or field write is skipped after this method returns. Defaults to the registered handler.
+    /// Inline guard queries call it too, unless the guard is marked with <see cref="SkipInlineFailuresAttribute"/>.
     /// </summary>
     protected internal virtual void OnFeatureMissing(string featureName, EngardeContext context)
     {
@@ -62,19 +60,10 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
         return null;
     }
 
-    /// <summary>
-    /// Identity for reusing this guard's store results and scope IDs inside an evaluation scope. Custom guards may
-    /// override with an immutable value containing all constructor settings, e.g. (GetType(), variant).
-    /// Arbitrary overrides that inspect <see cref="EngardeContext"/> are evaluated for every operation.
-    /// The value is memoized on first use for each attribute instance.
-    /// </summary>
-    protected virtual object CacheKey => GetType() == typeof(EngardeAttribute) ? GetType() : this;
-
-    internal object EvaluationCacheKey => CacheKeys.GetValue(this, static guard => new CachedKey(guard.CacheKey)).Value;
-
-    internal virtual ValueTask<bool> EvaluateAsync(EngardeEvaluation evaluation, string featureName, MemberInfo member, object? value) =>
-        GetType() == typeof(EngardeAttribute) ? evaluation.DefaultAsync(featureName)
-            : evaluation.CheckGuardAsync(this, featureName, member, value);
+    internal ValueTask<bool> EvaluateAsync(
+        EngardeEvaluation evaluation, string featureName, MemberInfo member, object? value, ScopeIdOverride? scopeId) =>
+        GetType() == typeof(EngardeAttribute) ? evaluation.DefaultAsync(featureName, scopeId)
+            : evaluation.CheckGuardAsync(this, featureName, member, value, scopeId);
 
     internal ScopeId? GetFeatureScopeId(EngardeContext context) => ResolveFeatureScopeId(context);
 }
@@ -103,23 +92,20 @@ public abstract class EngardeAttribute<TFeatureScopeIdProvider, TFeatureScopeId>
 public abstract class EngardeAttribute<TFeatureStore>(params string[] featureNames) : EngardeAttribute(featureNames)
     where TFeatureStore : notnull
 {
-    internal override ValueTask<bool> EvaluateAsync(EngardeEvaluation evaluation, string featureName, MemberInfo member, object? value) =>
-        evaluation.CheckAsync(new EngardeEvaluation.CheckKey(GetType(), featureName, null, EvaluationCacheKey),
-            (Guard: this, evaluation.Services, featureName),
-            static state => state.Guard.IsEnabledAsync(state.Guard.ResolveFeatureStore(state.Services), state.featureName));
-
     /// <summary>
     /// Resolves this guard's feature store. The default uses the current DI scope; override to return another
-    /// implementation or a fixed instance.
+    /// implementation or a fixed instance. A fixed instance works without <c>AddEngarde</c>.
     /// </summary>
     protected virtual TFeatureStore ResolveFeatureStore(IServiceProvider services) =>
-        services.GetRequiredService<TFeatureStore>();
+        (services ?? throw EngardeContext.NoServices()).GetRequiredService<TFeatureStore>();
 
     protected abstract ValueTask<bool> IsEnabledAsync(TFeatureStore store, string featureName);
 
     protected internal sealed override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
     {
-        return IsEnabledAsync(ResolveFeatureStore(context.Services), featureName);
+        if (context.ScopeIdOverride is not null)
+            throw new InvalidOperationException($"{GetType().Name} evaluates features without a feature scope id");
+        return IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName);
     }
 }
 
@@ -131,25 +117,12 @@ public abstract class EngardeAttribute<TFeatureStore, TFeatureScopeIdProvider, T
     where TFeatureStore : notnull
     where TFeatureScopeIdProvider : notnull
 {
-    internal override async ValueTask<bool> EvaluateAsync(EngardeEvaluation evaluation, string featureName, MemberInfo member, object? value)
-    {
-        var settings = EvaluationCacheKey;
-        var scopeId = await evaluation.ScopeIdAsync(new EngardeEvaluation.ScopeKey(GetType(), settings),
-            (Guard: this, evaluation.Services), static async state =>
-                await state.Guard.GetFeatureScopeIdAsync(state.Services.GetRequiredService<TFeatureScopeIdProvider>()).ConfigureAwait(false))
-            .ConfigureAwait(false);
-        return await evaluation.CheckAsync(new EngardeEvaluation.CheckKey(GetType(), featureName, scopeId, settings),
-            (Guard: this, evaluation.Services, featureName, scopeId), static state =>
-                state.Guard.IsEnabledAsync(state.Guard.ResolveFeatureStore(state.Services), state.featureName, (TFeatureScopeId)state.scopeId!))
-            .ConfigureAwait(false);
-    }
-
     /// <summary>
     /// Resolves this guard's feature store. The default uses the current DI scope; override to return another
-    /// implementation or a fixed instance.
+    /// implementation or a fixed instance. A fixed instance works without <c>AddEngarde</c>.
     /// </summary>
     protected virtual TFeatureStore ResolveFeatureStore(IServiceProvider services) =>
-        services.GetRequiredService<TFeatureStore>();
+        (services ?? throw EngardeContext.NoServices()).GetRequiredService<TFeatureStore>();
 
     protected abstract ValueTask<TFeatureScopeId> GetFeatureScopeIdAsync(TFeatureScopeIdProvider provider);
 
@@ -157,11 +130,24 @@ public abstract class EngardeAttribute<TFeatureStore, TFeatureScopeIdProvider, T
 
     protected internal sealed override async ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
     {
-        var scopeId = await context.GetOrAddFeatureScopeIdAsync(
-            this, async () => await GetFeatureScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>()));
+        var scopeId = context.ScopeIdOverride is { } scopeIdOverride
+            ? scopeIdOverride.Get(typeof(TFeatureScopeId), GetType())
+            : await GetFeatureScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>());
 
-        return await IsEnabledAsync(ResolveFeatureStore(context.Services), featureName, (TFeatureScopeId)scopeId!);
+        return await IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName, (TFeatureScopeId)scopeId!);
     }
 }
 
 internal sealed record ScopeId(Type Type, Func<ValueTask<object?>> Resolve);
+
+/// <summary>A feature scope id supplied to an inline query in place of the guard's or store's own resolution.</summary>
+internal sealed record ScopeIdOverride(object? Value)
+{
+    internal object? Get(Type expected, Type guard)
+    {
+        if (Value is null ? !expected.IsValueType || Nullable.GetUnderlyingType(expected) is not null : expected.IsInstanceOfType(Value))
+            return Value;
+        throw new InvalidOperationException(
+            $"{guard.Name} expects a {expected.Name} feature scope id, but {Value?.GetType().Name ?? "null"} was provided");
+    }
+}

@@ -1,359 +1,164 @@
 # Engarde
 
-Engarde compiles feature-toggle guards into methods, constructors, types, properties, fields, parameters, and injectable asynchronous queries.
-
-## Quick start
-
-Register an ASP.NET Core feature store with a scoped ID provider, add the request evaluation scope, then use guards as attributes or inject `IEngarde` for inline checks.
+Feature-flag guards for methods, constructors, types, properties, fields and parameters, plus generated injectable queries for inline checks.
 
 ```sh
-dotnet add package Engarde
+dotnet add package En-Garde
 ```
 
+## Examples
+
 ```csharp
-using System.Security.Claims;
-using Engarde;
-
-var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddEngarde(engarde => engarde
-    //Engarde needs a couple of things to run: 
-    //1. a feature toggle service to use (the feature service is resolved with DI, so it has to be registered in the service colletion)
-    //(optional) 2. a factory to resolve scope ID (a user resolver in this example) to check feature availability for
-    .UseFeatureStore<AppFeatureStore, CurrentUserService, string>(
-        user => ValueTask.FromResult(user.Id),
-        (store, featureName, userId) =>
-            store.IsEnabledAsync(featureName, userId))
-        
-    //Also, you can define global behavior what happens if the flag check is not passed
-    .OnFeatureMissing((featureName, context) =>
-        throw new InvalidOperationException(
-            $"Feature '{featureName}' is required by {context.Member.Name}.")));
-    
-var app = builder.Build();
-
-app.UseEngarde();
-
-//Can be any service that resolves scope relevant to feature limiting
-public sealed class CurrentUserService(...)
+[Engarde("new-experience-enabled")]
+public sealed class MyService
 {
-    public string Id => return SomeService.GetCurrentUserId();
-}
+    [MyCustomGuardThatThrows("beta-testers")]
+    public Task NewMethod();
 
-//A service to perform feature check against your scope (user Id in this example)
-public class AppFeatureStore
-{
-    ...
-    public ValueTask<bool> IsEnabledAsync(string featureName, string scopeId) =>
-        SomeFeatureApi.GetFeatureStatusForScope(scopeId);
-}
-```
-
-And then you simply put your guards anywhere you want! 
-They will automatically check if feature flag is enabled for a user in the scope of operation (say, an HTTP request in ASP.Net) when either method is invoked or property is set to non-default value, or simply do an inline check
-```csharp
-app.MapGet(
-    "/preview",
-    [Engarde("new-experience")] () => Results.Ok());
-
-[Engarde("new-experience")]
-public sealed class FeatureService
-{
-    [Engarde("operation-enabled")]
-    public Task RunAsync() => Task.CompletedTask;
-
-    [Engarde("editable-name")]
+    [AllowEditingNameGuard]
     public string? Name { get; set; }
 
-    [Engarde("editable-state")]
-    public string? State;
-
-    public void Update([Engarde("valid-input")] string value) { }
+    public void Update(string field, string value, [Engarde("version-update-allowed")] int version) { }
 }
 ```
+
+## Setup
+
+Register a feature store and, optionally, how to resolve the scope ID (here, the current user) that features are checked for.
 
 ```csharp
-public sealed class NavigationService(IEngarde engarde)
+builder.Services.AddScoped<CurrentUser>();
+builder.Services.AddSingleton<FeatureStore>();
+builder.Services.AddEngarde(engarde => engarde
+    .UseFeatureStore<FeatureStore, CurrentUser, string>(
+        user => ValueTask.FromResult(user.Id),
+        (store, featureName, userId) => store.IsEnabledAsync(featureName, userId))
+    .OnFeatureMissing((featureName, context) =>
+        throw new InvalidOperationException($"'{featureName}' is required by {context.Member.Name}")));
+
+var app = builder.Build();
+app.UseEngarde(); // checks use the request's services
+```
+
+Use `UseFeatureStore<FeatureStore>((store, featureName) => ...)` when features don't depend on a scope. Every check calls the store; nothing is cached.
+
+## Setup in apps without DI
+
+Derive from `EngardeAttribute<TStore>` and override `ResolveFeatureStore` to use a store that isn't resolved from DI.
+Guards that override both `IsEnabledAsync` and `OnFeatureMissing`, or return a fixed store, work without `AddEngarde`.
+
+```csharp
+public sealed partial class AppWithoutDiCustomGuard(params string[] featureNames)
+    : EngardeAttribute<FeatureStore>(featureNames)
 {
-    public ValueTask<bool> IsNewExperienceEnabledAsync() =>
-        engarde.IsEnabledAsync("new-experience");
+    protected override FeatureStore ResolveFeatureStore(IServiceProvider services) => new FeatureStore();
+
+    protected override ValueTask<bool> IsEnabledAsync(FeatureStore store, string featureName) =>
+        store.IsEnabledAsync(featureName, "app");
+
+    protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
+        throw new InvalidOperationException(featureName);
 }
 ```
 
-## Custom feature toggle names
+A guard is checked when a method or constructor is called, and when a property, field or parameter receives a non-empty value (not null, default, an empty string or an empty collection). A disabled feature calls `OnFeatureMissing`; throwing blocks the call, and a disabled property or field write is skipped.
 
-`GenerateFeatureGuards` converts feature-name strings to PascalCase and generates a sealed, feature-bound guard and injectable interface for each name.
+## Inline checks
+
+```csharp
+public sealed class Navigation(IEngarde engarde)
+{
+    public ValueTask<bool> ShowPreviewAsync() => engarde.IsFeatureEnabledAsync("new-experience");
+}
+```
+
+`IEngarde` only reports the status and never calls `OnFeatureMissing`.
+
+## Custom guards
+
+A partial guard gets a generated interface, registered by `AddEngarde`, for checking it inline.
+
+```csharp
+public sealed partial class ReportsGuard() : EngardeAttribute("reports")
+{
+    protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
+        throw new UnauthorizedAccessException(featureName);
+}
+
+public sealed class Reports
+{
+    [ReportsGuard]
+    public Task OpenAsync() => Task.CompletedTask;
+}
+
+public sealed class ReportsMenu(IReportsGuard reports)
+{
+    public ValueTask<bool> IsVisibleAsync() => reports.IsFeatureEnabledAsync();
+}
+```
+
+A guard that takes feature names, such as `PermissionGuard(params string[] featureNames)`, gets `IsFeatureEnabledAsync(string featureFlagName)` instead. A guard with a fixed feature name must be sealed.
+
+`GenerateFeatureGuards` creates one sealed guard and interface per feature name:
 
 ```csharp
 [GenerateFeatureGuards("reports-view", "reports-edit")]
-public partial class AccessGuard : EngardeAttribute
-{
-    protected override void OnFeatureMissing(
-        string featureName,
-        EngardeContext context) =>
-        throw new UnauthorizedAccessException(featureName);
-}
+public partial class AccessGuard : EngardeAttribute;
 
-// Generated at compile time:
-// sealed class ReportsViewAccessGuard : AccessGuard
-// interface IReportsViewAccessGuard { ValueTask<bool> IsEnabledAsync(); }
-// sealed class ReportsEditAccessGuard : AccessGuard
-// interface IReportsEditAccessGuard { ValueTask<bool> IsEnabledAsync(); }
-
-public sealed class ReportOperations
-{
-    [ReportsViewAccessGuard]
-    public Task OpenAsync() => Task.CompletedTask;
-}
-
-public sealed class ReportMenu(IReportsViewAccessGuard reports)
-{
-    public ValueTask<bool> IsVisibleAsync() => reports.IsEnabledAsync();
-}
+//Generated: ReportsViewAccessGuard / IReportsViewAccessGuard, ReportsEditAccessGuard / IReportsEditAccessGuard 
+// that automatically registered in DI if UseEngarde setup
 ```
 
-## Define a custom guard manually
+### Failures in inline checks
 
-A regular guard receives a feature name at each use, while a feature-bound guard fixes its feature name, must be sealed, and exposes a parameterless generated query.
+A guard's generated query calls its `OnFeatureMissing` for each disabled feature. Add `[SkipInlineFailures]` to return boolean result without calling OnFeatureMissing(); attribute guards still call it
 
 ```csharp
-public sealed partial class RuntimePermissionGuard(
-    params string[] featureNames)
-    : EngardeAttribute(featureNames)
-{
-    protected override void OnFeatureMissing(
-        string featureName,
-        EngardeContext context) =>
-        throw new UnauthorizedAccessException(featureName);
-}
-
-public sealed class RuntimePermissionOperations
-{
-    [RuntimePermissionGuard("reports-view")]
-    public Task OpenAsync() => Task.CompletedTask;
-}
-
-public sealed class RuntimePermissionQuery(
-    IRuntimePermissionGuard permission)
-{
-    public ValueTask<bool> CanOpenAsync() =>
-        permission.IsEnabledAsync("reports-view");
-}
+[SkipInlineFailures]
+public sealed partial class MenuGuard() : EngardeAttribute("menu");
 ```
+
+## Custom scope
 
 ```csharp
-public sealed partial class ReportsViewGuard()
-    : EngardeAttribute("reports-view")
+public sealed partial class UserGuard(params string[] featureNames)
+    : EngardeAttribute<CurrentUser, string>(featureNames)
 {
-    protected override void OnFeatureMissing(
-        string featureName,
-        EngardeContext context) =>
-        throw new UnauthorizedAccessException(featureName);
-}
-
-public sealed class ReportsViewOperations
-{
-    [ReportsViewGuard]
-    public Task OpenAsync() => Task.CompletedTask;
-}
-
-public sealed class ReportsViewQuery(IReportsViewGuard permission)
-{
-    public ValueTask<bool> CanOpenAsync() =>
-        permission.IsEnabledAsync();
+    protected override ValueTask<string> GetFeatureScopeIdAsync(CurrentUser user) =>
+        ValueTask.FromResult(user.Id);
 }
 ```
 
-## Custom feature toggle store
-
-Derive from `EngardeAttribute<TStore>` to share custom store behavior and override `ResolveFeatureStore` in a child when it needs a different or fixed instance.
+A guard with its own scope ID type also gets a query overload that takes the scope ID, to check another scope instead of the current one:
 
 ```csharp
-public abstract class StoreBackedGuard(
-    params string[] featureNames)
-    : EngardeAttribute<AppFeatureStore>(featureNames)
+public sealed class Admin(IUserGuard guard)
 {
-    protected override ValueTask<bool> IsEnabledAsync(
-        AppFeatureStore store,
-        string featureName) =>
-        store.IsEnabledAsync(featureName, "global");
-}
-
-public sealed partial class SearchGuard()
-    : StoreBackedGuard("search");
-
-public sealed partial class PreviewGuard()
-    : StoreBackedGuard("preview")
-{
-    private static readonly AppFeatureStore Store = new();
-
-    protected override AppFeatureStore ResolveFeatureStore(
-        IServiceProvider services) =>
-        Store;
+    public ValueTask<bool> CanExportAsync(string userId) => guard.IsFeatureEnabledAsync("export", userId);
 }
 ```
 
-## Custom scope ID
+Any guard can be checked for a scope ID with `Engarde.CreateInstance().IsFeatureEnabledAsync<TScopeId>(guard, scopeId)`; the type must match the guard's or the registered store's.
 
-Derive from `EngardeAttribute<TScopeProvider, TScopeId>` to share scope resolution and override `GetFeatureScopeIdAsync` in a child when its scope differs.
+`IEngarde` and generated interfaces are scoped by default; change that with `.UseQueryLifetime(ServiceLifetime.Singleton)`. 
 
-```csharp
-public abstract class TenantScopedGuard(
-    params string[] featureNames)
-    : EngardeAttribute<CurrentTenant, string>(featureNames)
-{
-    protected override ValueTask<string> GetFeatureScopeIdAsync(
-        CurrentTenant tenant) =>
-        ValueTask.FromResult(tenant.Id);
-}
-
-public sealed partial class TenantSettingsGuard()
-    : TenantScopedGuard("tenant-settings");
-
-public sealed partial class SharedSettingsGuard()
-    : TenantScopedGuard("shared-settings")
-{
-    protected override ValueTask<string> GetFeatureScopeIdAsync(
-        CurrentTenant tenant) =>
-        ValueTask.FromResult($"shared:{tenant.Id}");
-}
-```
-
-## .NET Core DI setup
-
-`AddEngarde` registers `IEngarde` and every compile-time generated guard interface automatically as scoped services unless `UseQueryLifetime` selects another lifetime.
-
-```csharp
-builder.Services.AddSingleton<AppFeatureStore>();
-builder.Services.AddScoped<CurrentTenant>();
-builder.Services.AddEngarde(engarde => engarde
-    .UseFeatureStore<AppFeatureStore, CurrentTenant, string>(
-        tenant => ValueTask.FromResult(tenant.Id),
-        (store, featureName, tenantId) =>
-            store.IsEnabledAsync(featureName, tenantId))
-    .OnFeatureMissing((featureName, _) =>
-        throw new InvalidOperationException(featureName)));
-
-public sealed class ReportService(
-    IEngarde engarde,
-    IReportsViewAccessGuard reportsView,
-    IRuntimePermissionGuard runtimePermission)
-{
-    public ValueTask<bool> IsAnyReportEntryEnabledAsync() =>
-        reportsView.IsEnabledAsync();
-}
-```
-
-```csharp
-builder.Services.AddEngarde(engarde => engarde
-    .UseFeatureStore<AppFeatureStore>(
-        (store, featureName) =>
-            store.IsEnabledAsync(featureName, "global"))
-    .OnFeatureMissing((featureName, _) =>
-        throw new InvalidOperationException(featureName))
-    .UseQueryLifetime(ServiceLifetime.Transient));
-```
-
-## DI in legacy apps
-
-For a .NET Framework 4.7.2-style application, populate Autofac from `IServiceCollection`, activate Engarde once, and borrow each Autofac lifetime scope for woven and inline checks.
-
-```xml
-<package id="Autofac" version="6.5.0" targetFramework="net472" />
-<package id="Autofac.Extensions.DependencyInjection" version="8.0.0" targetFramework="net472" />
-<package id="Engarde" version="1.0.0" targetFramework="net472" />
-```
-
-```csharp
-using Autofac;
-using Autofac.Extensions.DependencyInjection;
-using Engarde;
-using Microsoft.Extensions.DependencyInjection;
-using Guard = Engarde.Engarde;
-
-public static class Bootstrapper
-{
-    public static async Task RunAsync()
-    {
-        var services = new ServiceCollection();
-        services.AddSingleton<AppFeatureStore>();
-        services.AddScoped<LegacyTenant>();
-        services.AddEngarde(engarde => engarde
-            .UseFeatureStore<AppFeatureStore, LegacyTenant, string>(
-                tenant => ValueTask.FromResult(tenant.Id),
-                (store, featureName, tenantId) =>
-                    store.IsEnabledAsync(featureName, tenantId))
-            .OnFeatureMissing((featureName, _) =>
-                throw new InvalidOperationException(featureName)));
-
-        var builder = new ContainerBuilder();
-        builder.Populate(services);
-
-        using (var container = builder.Build())
-        {
-            var rootServices = new AutofacServiceProvider(container);
-            Guard.Activate(rootServices);
-
-            using (var lifetime = container.BeginLifetimeScope())
-            {
-                var requestServices = new AutofacServiceProvider(lifetime);
-                using (Guard.BeginScope(requestServices, createScope: false))
-                using (Guard.BeginEvaluationScope(requestServices))
-                {
-                    var engarde = requestServices.GetRequiredService<IEngarde>();
-                    var reports = requestServices.GetRequiredService<IReportsViewAccessGuard>();
-
-                    bool first = await engarde.IsEnabledAsync("new-experience");
-                    bool second = await reports.IsEnabledAsync();
-                }
-            }
-        }
-    }
-}
-
-public sealed class LegacyTenant
-{
-    public string Id => Thread.CurrentPrincipal?.Identity?.Name ?? "anonymous";
-}
-```
-
-## How to test
-
-`Engarde.Testing` generates class and method overrides for all guards, with optional feature-name filters and inherited test-class behavior.
+## Testing
 
 ```sh
-dotnet add package Engarde.Testing
+dotnet add package En-Garde.Testing
 ```
 
 ```csharp
-using Engarde.Testing;
-
 [DisableAllEngarde]
 public abstract class UnitTestBase;
 
-public sealed class ServiceTests : UnitTestBase
-{
-    [Fact]
-    public Task Runs_without_guards() =>
-        service.RunAsync();
-}
-```
-
-```csharp
-[DisableAllEngarde]
-public abstract class DisabledGuardTests;
-
 [EnableAllEngarde("new-experience")]
-public sealed class NewExperienceTests : DisabledGuardTests;
-
-[DisableIRuntimePermissionGuard("reports-edit")]
-public sealed class ReportsEditTests;
-
-public sealed class MethodOverrideTests
+public sealed class NewExperienceTests : UnitTestBase
 {
-    [DisableEngarde("operation-enabled")]
+    [DisableReportsGuard]
     [Fact]
-    public Task Runs_without_the_selected_default_guard() =>
-        service.RunAsync();
+    public Task Opens_reports_without_the_guard() => reports.OpenAsync();
 }
 ```
+
+Each guard gets `Enable<Guard>` and `Disable<Guard>` attributes for test classes and methods, optionally filtered by feature names.

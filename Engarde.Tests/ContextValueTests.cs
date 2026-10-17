@@ -18,7 +18,6 @@ public sealed class ContextValueTests
         var contexts = new List<EngardeContext>();
         await using var services = Services(contexts);
         using var active = Engarde.Engarde.BeginScope(services);
-        using var evaluation = Engarde.Engarde.BeginEvaluationScope();
         Subject.Run();
         Subject.Run();
         var calls = 0;
@@ -81,8 +80,14 @@ public sealed class ContextValueTests
         var contexts = new List<EngardeContext>();
         await using var services = Services(contexts);
         using var active = Engarde.Engarde.BeginScope(services);
-        Assert.False(await Engarde.Engarde.CreateInstance().IsEnabledAsync(new InspectingGuard(contexts.Add)));
-        Assert.Null(Assert.Single(contexts).Value);
+        Assert.False(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync(new InspectingGuard(contexts.Add)));
+        // The guard's evaluation context, then the missing-feature handler's context
+        Assert.Equal(2, contexts.Count);
+        Assert.All(contexts, context =>
+        {
+            Assert.Null(context.Value);
+            Assert.Equal(typeof(InspectingGuard), context.Member);
+        });
     }
 
     private sealed class InspectingGuard(Action<EngardeContext> observe) : EngardeAttribute("disabled")
