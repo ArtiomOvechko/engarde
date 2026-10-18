@@ -5,7 +5,7 @@ namespace Engarde;
 public sealed partial class Engarde
 {
     private static readonly AsyncLocal<ActiveScope?> ScopedServices = new();
-    private static IServiceProvider? _services;
+    private static ActiveScope? _application;
 
     /// <summary>
     /// Activates guards for the whole application with the provider where <c>AddEngarde</c> was registered;
@@ -13,7 +13,7 @@ public sealed partial class Engarde
     /// </summary>
     public static void Activate(IServiceProvider services)
     {
-        _services = services;
+        _application = new(services, services.GetService<EngardeConfiguration>(), true);
     }
 
     /// <summary>
@@ -36,25 +36,20 @@ public sealed partial class Engarde
     {
         if (services is null) throw new ArgumentNullException(nameof(services));
         var previous = ScopedServices.Value;
-        ScopedServices.Value = new(services, createScope);
+        ScopedServices.Value = new(services, services.GetService<EngardeConfiguration>(), createScope);
 
         return new Scope(() => ScopedServices.Value = previous);
     }
 
     internal static bool TryGetCurrent(out ActiveServices current)
     {
-        if (ScopedServices.Value is { } scoped)
-        {
-            current = new(scoped.Services, scoped.Services.GetRequiredService<EngardeConfiguration>(), scoped.CreateScope);
-            return true;
-        }
-        if (_services is null)
+        if ((ScopedServices.Value ?? _application) is not { } active)
         {
             current = default;
             return false;
         }
 
-        current = new(_services, _services.GetRequiredService<EngardeConfiguration>(), true);
+        current = active.ToServices();
         return true;
     }
 
@@ -66,14 +61,19 @@ public sealed partial class Engarde
             return false;
         }
 
-        services = new(scoped.Services, scoped.Services.GetRequiredService<EngardeConfiguration>(), scoped.CreateScope);
+        services = scoped.ToServices();
         return true;
     }
 
     internal readonly record struct ActiveServices(
         IServiceProvider Services, EngardeConfiguration Configuration, bool CreateScope);
 
-    private sealed record ActiveScope(IServiceProvider Services, bool CreateScope);
+    // Without AddEngarde the configuration is missing, and resolving it again reports that on use
+    private sealed record ActiveScope(IServiceProvider Services, EngardeConfiguration? Configuration, bool CreateScope)
+    {
+        public ActiveServices ToServices() =>
+            new(Services, Configuration ?? Services.GetRequiredService<EngardeConfiguration>(), CreateScope);
+    }
 
     private sealed class Scope(Action dispose) : IDisposable
     {

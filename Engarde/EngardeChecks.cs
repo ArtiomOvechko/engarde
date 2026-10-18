@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 
 namespace Engarde;
@@ -28,18 +29,7 @@ public static class EngardeChecks
 
     public static void CheckMethod(RuntimeMethodHandle method, RuntimeTypeHandle type)
     {
-        var guards = MethodGuardsCache.GetOrAdd((method.Value, type.Value), static (_, handles) =>
-        {
-            var methodBase = MethodBase.GetMethodFromHandle(handles.method, handles.type)!;
-            // MethodBase.IsConstructor excludes .cctor; ConstructorInfo covers both constructor kinds.
-            var typeGuards = methodBase is ConstructorInfo || !methodBase.IsSpecialName
-                ? GetGuards(methodBase.DeclaringType!)
-                : [];
-
-            return new Guards(methodBase, [..GetGuards(methodBase), ..typeGuards]);
-        }, (method, type));
-
-        Validate(guards, null);
+        Validate(GetMethodGuards(method, type), null);
     }
 
     public static void CheckParameter<T>(T value, RuntimeMethodHandle method, RuntimeTypeHandle type, int index)
@@ -47,14 +37,7 @@ public static class EngardeChecks
         if (IsEmpty(value))
             return;
 
-        var guards = ParameterGuardsCache.GetOrAdd((method.Value, type.Value, index), static (_, handles) =>
-        {
-            var methodBase = MethodBase.GetMethodFromHandle(handles.method, handles.type)!;
-
-            return new Guards(methodBase, GetGuards(methodBase.GetParameters()[handles.index]));
-        }, (method, type, index));
-
-        Validate(guards, value);
+        Validate(GetParameterGuards(method, type, index), value);
     }
 
     public static bool CheckProperty<T>(T value, RuntimeMethodHandle setter, RuntimeTypeHandle type)
@@ -64,11 +47,9 @@ public static class EngardeChecks
 
         var guards = PropertyGuardsCache.GetOrAdd((setter.Value, type.Value), static (_, handles) =>
         {
-            var setterMethod = MethodBase.GetMethodFromHandle(handles.setter, handles.type)!;
-            var property = setterMethod.DeclaringType!.GetProperties(DeclaredMembers)
-                .First(property => property.SetMethod?.MetadataToken == setterMethod.MetadataToken);
+            var property = FindSetterProperty(MethodBase.GetMethodFromHandle(handles.setter, handles.type)!)!;
 
-            return new Guards(property, GetGuards(property));
+            return new Guards(property, CollectPropertyGuards(property));
         }, (setter, type));
 
         return Validate(guards, value);
@@ -88,7 +69,7 @@ public static class EngardeChecks
 
             return property is null
                 ? new Guards(fieldInfo, GetGuards(fieldInfo))
-                : new Guards(property, [..GetGuards(fieldInfo), ..GetGuards(property)]);
+                : new Guards(property, [..GetGuards(fieldInfo), ..CollectPropertyGuards(property)]);
         }, (field, type));
 
         return Validate(guards, value);
@@ -248,8 +229,16 @@ public static class EngardeChecks
         return enabled;
     }
 
-    private static bool HasEnabledGuards(Guards guards) =>
-        guards.Attributes.Any(guard => guard.FeatureNames.Any(featureName => IsGuardEnabled(guard, featureName)));
+    private static bool HasEnabledGuards(Guards guards)
+    {
+        foreach (var guard in guards.Attributes)
+        {
+            for (var index = 0; index < guard.FeatureNames.Count; index++)
+                if (IsGuardEnabled(guard, guard.FeatureNames[index]))
+                    return true;
+        }
+        return false;
+    }
 
     private static bool IsGuardEnabled(EngardeAttribute guard, string featureName) =>
         Volatile.Read(ref _guardOverride)?.Invoke(guard.GetType(), featureName) != false;
@@ -258,18 +247,14 @@ public static class EngardeChecks
         MethodGuardsCache.GetOrAdd((method.Value, type.Value), static (_, handles) =>
         {
             var methodBase = MethodBase.GetMethodFromHandle(handles.method, handles.type)!;
-            var typeGuards = methodBase is ConstructorInfo || !methodBase.IsSpecialName
-                ? GetGuards(methodBase.DeclaringType!)
-                : [];
-
-            return new Guards(methodBase, [..GetGuards(methodBase), ..typeGuards]);
+            return new Guards(methodBase, CollectMethodGuards(methodBase));
         }, (method, type));
 
     private static Guards GetParameterGuards(RuntimeMethodHandle method, RuntimeTypeHandle type, int index) =>
         ParameterGuardsCache.GetOrAdd((method.Value, type.Value, index), static (_, handles) =>
         {
             var methodBase = MethodBase.GetMethodFromHandle(handles.method, handles.type)!;
-            return new Guards(methodBase, GetGuards(methodBase.GetParameters()[handles.index]));
+            return new Guards(methodBase, CollectParameterGuards(methodBase, handles.index));
         }, (method, type, index));
 
     private static bool IsEmpty<T>(T value)
@@ -299,6 +284,76 @@ public static class EngardeChecks
     {
         return provider.GetCustomAttributes(typeof(EngardeAttribute), false).Cast<EngardeAttribute>().ToArray();
     }
+
+    private static EngardeAttribute[] CollectMethodGuards(MethodBase method)
+    {
+        IEnumerable<EngardeAttribute> guards = [..GetGuards(method), ..InheritedMethods(method).SelectMany(GetGuards)];
+        return ((method is ConstructorInfo || !method.IsSpecialName) && !method.IsDefined(typeof(CompilerGeneratedAttribute), false)
+            ? guards.Concat(TypeGuards(method))
+            : guards).ToArray();
+    }
+
+    private static EngardeAttribute[] CollectParameterGuards(MethodBase method, int index) =>
+        [..GetGuards(method.GetParameters()[index]), ..InheritedMethods(method).SelectMany(inherited => GetGuards(inherited.GetParameters()[index]))];
+
+    private static EngardeAttribute[] CollectPropertyGuards(PropertyInfo property) =>
+        [..GetGuards(property), ..(property.SetMethod is { } setter
+            ? InheritedMethods(setter).SelectMany(inherited => FindSetterProperty(inherited) is { } guarded ? GetGuards(guarded) : [])
+            : [])];
+
+    private static PropertyInfo? FindSetterProperty(MethodBase setter) => setter.DeclaringType!.GetProperties(DeclaredMembers)
+        .FirstOrDefault(property => property.SetMethod is { } candidate && SameMethod(candidate, setter));
+
+    private static IEnumerable<MethodBase> InheritedMethods(MethodBase method)
+    {
+        if (method is not MethodInfo { IsVirtual: true } info)
+            yield break;
+
+        var declaringType = info.DeclaringType!;
+        var root = info.GetBaseDefinition();
+        if (!SameMethod(root, info))
+        {
+            for (var type = declaringType.BaseType; type is not null; type = type.BaseType)
+            {
+                var overridden = type.GetMethods(DeclaredMembers)
+                    .FirstOrDefault(candidate => candidate.IsVirtual && SameMethod(candidate.GetBaseDefinition(), root));
+                if (overridden is not null)
+                    yield return overridden;
+            }
+        }
+
+        if (declaringType.IsInterface)
+            yield break;
+        foreach (var @interface in declaringType.GetInterfaces().OrderBy(@interface => @interface.FullName, StringComparer.Ordinal))
+        {
+            var map = declaringType.GetInterfaceMap(@interface);
+            for (var index = 0; index < map.TargetMethods.Length; index++)
+                if (SameMethod(map.TargetMethods[index], info))
+                    yield return map.InterfaceMethods[index];
+        }
+    }
+
+    private static IEnumerable<EngardeAttribute> TypeGuards(MethodBase method)
+    {
+        var type = method.DeclaringType!;
+        IEnumerable<Type> sources = [type];
+        if (method is ConstructorInfo { IsStatic: false })
+        {
+            var inherited = type.BaseType?.GetInterfaces() ?? [];
+            sources = sources.Concat(type.GetInterfaces().Except(inherited).OrderBy(@interface => @interface.FullName, StringComparer.Ordinal));
+        }
+        else if (method is not ConstructorInfo)
+        {
+            for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
+                sources = sources.Append(baseType);
+            sources = sources.Concat(type.GetInterfaces().OrderBy(@interface => @interface.FullName, StringComparer.Ordinal));
+        }
+        foreach (var guard in sources.SelectMany(GetGuards))
+            yield return guard;
+    }
+
+    private static bool SameMethod(MethodBase left, MethodBase right) =>
+        left.MetadataToken == right.MetadataToken && left.Module == right.Module && left.DeclaringType == right.DeclaringType;
 
     private sealed record Guards(MemberInfo Member, EngardeAttribute[] Attributes);
 }

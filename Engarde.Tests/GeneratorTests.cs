@@ -64,11 +64,54 @@ public sealed class GeneratorTests
                 .ToArray());
         Assert.Equal(new[] { "", "scopeId" }, contracts["ISettingsGuard"]);
         Assert.Equal(new[] { "featureFlagName", "featureFlagName,scopeId" }, contracts["IRuntimeGuard"]);
-        Assert.Equal(new[] { "" }, contracts["IPlainGuard"]);
+        Assert.Equal(new[] { "", "scopeId" }, contracts["IPlainGuard"]);
         // A constructor query takes precedence over a scope overload with the same signature
         Assert.Equal(new[] { "", "level", "level,scopeId" }, contracts["IOverlapGuard"]);
         // A string scope id must not bind to the feature name overload
         Assert.Contains(result.GeneratedTrees, tree => tree.ToString().Contains("IsFeatureEnabledAsync<string>(new global::Consumer.SettingsGuard(), scopeId)"));
+    }
+
+    [Fact]
+    public void Generates_generic_scope_id_overloads_for_guards_on_the_registered_store()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            [GenerateFeatureGuards("feature")]
+            public partial class PermissionGuard : EngardeAttribute;
+            [GenerateFeatureGuards("feature")]
+            public partial class LevelGuard : EngardeAttribute
+            {
+                public LevelGuard() { }
+                public LevelGuard(int level) { }
+            }
+            public sealed partial class GenericGuard<TFeatureScopeId>() : EngardeAttribute("generic");
+            public sealed partial class StoreGuard() : EngardeAttribute<object>("store")
+            {
+                protected override System.Threading.Tasks.ValueTask<bool> IsEnabledAsync(object store, string featureName) => new(true);
+            }
+            public static class Caller
+            {
+                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync() =>
+                    await FeaturePermissionGuard.CreateInstance().IsFeatureEnabledAsync(7)
+                    && await FeatureLevelGuard.CreateInstance().IsFeatureEnabledAsync(1, "tenant")
+                    && await GenericGuard<int>.CreateInstance().IsFeatureEnabledAsync(7L);
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .ToDictionary(contract => contract.Identifier.ValueText, contract => contract.Members
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .Select(method => method.TypeParameterList + "(" + string.Join(",", method.ParameterList.Parameters.Select(parameter => parameter.ToString())) + ")")
+                .ToArray());
+        Assert.Equal(new[] { "()", "<TFeatureScopeId>(TFeatureScopeId scopeId)" }, contracts["IFeaturePermissionGuard"]);
+        // A level argument would take the scope id of a parameterless generic overload, so only the level one is generated
+        Assert.Equal(new[] { "()", "(int level)", "<TFeatureScopeId>(int level,TFeatureScopeId scopeId)" }, contracts["IFeatureLevelGuard"]);
+        Assert.Equal(new[] { "()", "<_TFeatureScopeId>(_TFeatureScopeId scopeId)" }, contracts["IGenericGuard"]);
+        // A guard with its own store has no feature scope to override
+        Assert.Equal(new[] { "()" }, contracts["IStoreGuard"]);
     }
 
     [Fact]
@@ -77,7 +120,11 @@ public sealed class GeneratorTests
         var compilation = Compile("""
             public sealed class AccessGuard() : EngardeAttribute("access");
             public abstract class TenantGuard() : EngardeAttribute<object, string>("tenant");
-            public sealed class Marker : System.Attribute;
+            [GenerateFeatureGuards("feature")]
+            public class TemplateGuard : EngardeAttribute;
+            public class ForwardingGuard(params string[] featureNames) : EngardeAttribute(featureNames);
+            public class OpenGuard() : EngardeAttribute("open");
+            public class Marker : System.Attribute;
             """);
         var diagnostics = await compilation.WithAnalyzers(
                 [new AttributeConventionAnalyzer(), new GuardDiagnosticSuppressor()],
@@ -85,20 +132,30 @@ public sealed class GeneratorTests
                     new AnalyzerOptions([]), null, false, false, reportSuppressedDiagnostics: true))
             .GetAnalyzerDiagnosticsAsync();
 
-        Assert.Equal(6, diagnostics.Length);
-        Assert.All(diagnostics, diagnostic => Assert.Equal(
-            !diagnostic.GetMessage().Contains("Marker"), diagnostic.IsSuppressed));
+        var reported = diagnostics.Select(diagnostic => $"{diagnostic.Id} {diagnostic.GetMessage().Split(' ')[0]} {diagnostic.IsSuppressed}");
+        Assert.Equal(new[]
+        {
+            "S3376 AccessGuard True", "S3993 AccessGuard True",
+            "S3376 TenantGuard True", "S3993 TenantGuard True",
+            "S3376 TemplateGuard True", "S3993 TemplateGuard True", "S4060 TemplateGuard True",
+            "S3376 ForwardingGuard True", "S3993 ForwardingGuard True", "S4060 ForwardingGuard True",
+            // Unsealed without being a template or a forwarding base: the rule still applies
+            "S3376 OpenGuard True", "S3993 OpenGuard True", "S4060 OpenGuard False",
+            "S3376 Marker False", "S3993 Marker False", "S4060 Marker False"
+        }.Order(), reported.Order());
     }
 
-    // Stands in for SonarAnalyzer's S3376 (Attribute suffix) and S3993 (AttributeUsage) rules; it only runs in this test
+    // Stands in for SonarAnalyzer's S3376 (Attribute suffix), S3993 (AttributeUsage) and S4060 (unsealed attribute)
+    // rules; it only runs in this test
 #pragma warning disable RS1036, RS2008
     [DiagnosticAnalyzer(LanguageNames.CSharp)]
     private sealed class AttributeConventionAnalyzer : DiagnosticAnalyzer
     {
         private static readonly DiagnosticDescriptor Suffix = new("S3376", "Suffix", "{0} needs the Attribute suffix", "Naming", DiagnosticSeverity.Warning, true);
         private static readonly DiagnosticDescriptor Usage = new("S3993", "Usage", "{0} needs AttributeUsage", "Design", DiagnosticSeverity.Warning, true);
+        private static readonly DiagnosticDescriptor Sealed = new("S4060", "Sealed", "{0} should be sealed or abstract", "Performance", DiagnosticSeverity.Warning, true);
 
-        public override System.Collections.Immutable.ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Suffix, Usage];
+        public override System.Collections.Immutable.ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Suffix, Usage, Sealed];
 
         public override void Initialize(AnalysisContext context)
         {
@@ -112,6 +169,8 @@ public sealed class GeneratorTests
                     if (parent.ToDisplayString() != "System.Attribute") continue;
                     symbol.ReportDiagnostic(Diagnostic.Create(Suffix, type.Locations[0], type.Name));
                     symbol.ReportDiagnostic(Diagnostic.Create(Usage, type.Locations[0], type.Name));
+                    if (!type.IsSealed && !type.IsAbstract)
+                        symbol.ReportDiagnostic(Diagnostic.Create(Sealed, type.Locations[0], type.Name));
                 }
             }, SymbolKind.NamedType);
         }
@@ -176,11 +235,11 @@ public sealed class GeneratorTests
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .ToDictionary(contract => contract.Identifier.ValueText);
         var unbound = Assert.Single(contracts["IUnboundGuard"].Members
-            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null);
         Assert.Equal(new[] { "setting", "featureFlagName" }, unbound.ParameterList.Parameters
             .Select(parameter => parameter.Identifier.ValueText));
         var bound = Assert.Single(contracts["IBoundGuard"].Members
-            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null);
         Assert.Equal(new[] { "setting" }, bound.ParameterList.Parameters
             .Select(parameter => parameter.Identifier.ValueText));
     }
@@ -203,7 +262,8 @@ public sealed class GeneratorTests
         var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .Single(type => type.Identifier.ValueText == "IGuard");
-        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
+            method => method.TypeParameterList is null);
         Assert.Empty(method.ParameterList.Parameters);
     }
 
@@ -243,7 +303,8 @@ public sealed class GeneratorTests
         var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .Single(type => type.Identifier.ValueText == "IFeaturePermissionGuard");
-        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
+            method => method.TypeParameterList is null);
         Assert.Empty(method.ParameterList.Parameters);
         var generatedGuard = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax>())
@@ -280,7 +341,8 @@ public sealed class GeneratorTests
             var contract = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                     .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
                 .Single(type => type.Identifier.ValueText == interfaceName);
-            var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+            var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
+            method => method.TypeParameterList is null);
             Assert.Equal("int level", Assert.Single(method.ParameterList.Parameters).ToString());
         }
     }
@@ -314,7 +376,8 @@ public sealed class GeneratorTests
         Assert.Equal("IEngarde.g.cs", Path.GetFileName(tree.FilePath));
         var contract = tree.GetRoot().DescendantNodes()
             .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>().Single();
-        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>());
+        var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
+            method => method.TypeParameterList is null);
         Assert.Equal("IEngarde", contract.Identifier.ValueText);
         Assert.Equal("IsFeatureEnabledAsync", method.Identifier.ValueText);
         Assert.Equal("string featureFlagName", Assert.Single(method.ParameterList.Parameters).ToString());
