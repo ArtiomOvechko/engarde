@@ -63,6 +63,34 @@ public sealed partial class AppWithoutDiCustomGuard(params string[] featureNames
 
 A guard is checked when a method or constructor is called, and when a property, field or parameter receives a non-empty value (not null, default, an empty string or an empty collection). A disabled feature calls `OnFeatureMissing`; throwing blocks the call, and a disabled property or field write is skipped.
 
+## Inherited guards
+
+Guards are inherited down the type hierarchy:
+
+- An interface guard is checked when any implementing class or struct is constructed.
+- A class guard also guards the methods of derived classes (it already ran in the base constructor).
+- A method, property or parameter guard also guards the members that override or implement it.
+
+```csharp
+[Engarde("my-feature")]
+public interface IMyFeature
+{
+    [Engarde("my-feature-run")]
+    Task RunAsync([Engarde("my-feature-option")] int option);
+}
+
+[Engarde("my-feature-beta")]
+public sealed class MyFeature : IMyFeature // constructing it checks "my-feature-beta" and "my-feature"
+{
+    // checks "my-feature-run" and "my-feature-beta", plus "my-feature-option" for a non-zero option
+    public Task RunAsync(int option) => Task.CompletedTask;
+}
+```
+
+Inherited guards add up: every guard along the hierarchy runs, in addition to the member's and type's own, even when several guards name the same feature.
+
+When a class re-declares an interface whose members are implemented by methods inherited from a base class that doesn't implement it, Engarde adds an explicit implementation to the class. A call through the interface checks the interface member's guards, then calls the inherited method, which checks its own member and type guards.
+
 ## Inline checks
 
 ```csharp

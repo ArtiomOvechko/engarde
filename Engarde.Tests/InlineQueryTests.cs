@@ -61,6 +61,20 @@ public sealed class InlineQueryTests
     }
 
     [Fact]
+    public async Task Feature_bound_guards_on_the_registered_store_accept_a_scope_id()
+    {
+        var calls = new List<(string Flag, int Scope)>();
+        await using var services = Services(calls, []);
+        using var active = Guard.BeginScope(services);
+
+        Assert.True(await EnabledRegisteredScopeGuard.CreateInstance().IsFeatureEnabledAsync(7));
+        Assert.False(await EnabledRegisteredScopeGuard.CreateInstance().IsFeatureEnabledAsync(8));
+        Assert.Equal(new[] { ("enabled", 7), ("enabled", 8) }, calls);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            EnabledRegisteredScopeGuard.CreateInstance().IsFeatureEnabledAsync(7L).AsTask());
+    }
+
+    [Fact]
     public async Task Scope_ids_are_rejected_when_the_store_has_no_feature_scope()
     {
         await using var services = new ServiceCollection().AddSingleton(new Store())
@@ -92,6 +106,9 @@ public sealed class InlineQueryTests
 [SkipInlineFailures]
 [GenerateFeatureGuards("disabled")]
 public partial class QuietGuard : EngardeAttribute;
+
+[GenerateFeatureGuards("enabled")]
+public partial class RegisteredScopeGuard : EngardeAttribute;
 
 public static class QuietGuarded
 {

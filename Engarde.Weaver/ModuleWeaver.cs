@@ -59,7 +59,8 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         if (module.Types.Any(type => type.Namespace == MarkerNamespace && type.Name == MarkerName))
             return 0;
 
-        var woven = WeaveGuardedMembers();
+        var woven = AddInheritedImplementations();
+        woven += WeaveGuardedMembers();
         RedirectAsyncMethodReferences();
         woven += WeaveFieldWrites();
         woven += WeaveTestingScopes();
@@ -104,6 +105,130 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         }
     }
 
+    /// <summary>
+    /// A class re-declaring an interface may implement its members with methods inherited from a base class that
+    /// doesn't implement the interface. Each such guarded member gets a compiler-generated explicit implementation
+    /// forwarding to the inherited method, so calls through the interface check the member's guards on top of the
+    /// inherited method's own.
+    /// </summary>
+    private int AddInheritedImplementations()
+    {
+        var added = 0;
+        foreach (var type in _module.GetTypes().Where(type => type.IsClass && !type.IsInterface && !type.IsValueType).ToList())
+        {
+            var bases = BaseTypes(type).ToList();
+            var seen = new HashSet<string>();
+            foreach (var (@interface, context) in Interfaces(type, null).ToList())
+            {
+                var interfaceReference = (TypeReference?)context ?? @interface;
+                if (!seen.Add(interfaceReference.FullName))
+                    continue;
+                foreach (var member in @interface.Methods.Where(member => !member.IsStatic && member.IsVirtual &&
+                             HasMemberGuard(@interface, member) && !HasByReference(member)).ToList())
+                {
+                    var signature = Signature(member, context);
+                    if (type.Methods.Any(method =>
+                            method.Overrides.Any(@override => @override.Name == member.Name &&
+                                @override.DeclaringType.FullName == interfaceReference.FullName) ||
+                            (method.IsPublic && !method.IsStatic && method.Name == member.Name && Signature(method, null) == signature)))
+                        continue;
+
+                    var inherited = bases
+                        .Select(@base => (@base.Type, @base.Context,
+                            Method: @base.Type.Methods.FirstOrDefault(method => method.IsPublic && !method.IsStatic &&
+                                method.Name == member.Name && Signature(method, @base.Context) == signature)))
+                        .FirstOrDefault(candidate => candidate.Method is not null);
+                    // A base class implementing the interface itself already checks the member's guards
+                    if (inherited.Method is null ||
+                        BaseTypes(inherited.Type).Prepend((inherited.Type, inherited.Context)).Any(@base =>
+                            Interfaces(@base.Type, null).Any(implemented => implemented.Type == @interface)))
+                        continue;
+
+                    AddForwarder(type, interfaceReference, context, member,
+                        inherited.Method, (TypeReference?)inherited.Context ?? inherited.Type);
+                    added++;
+                }
+            }
+        }
+        return added;
+    }
+
+    private bool HasMemberGuard(TypeDefinition @interface, MethodDefinition member) =>
+        HasGuard(member) || member.Parameters.Any(HasGuard) ||
+        @interface.Properties.FirstOrDefault(property => property.SetMethod == member) is { } property && HasGuard(property);
+
+    private static bool HasByReference(MethodDefinition method) =>
+        method.ReturnType is ByReferenceType or IModifierType ||
+        method.Parameters.Any(parameter => parameter.ParameterType is ByReferenceType or IModifierType or PointerType);
+
+    private void AddForwarder(TypeDefinition type, TypeReference interfaceReference, GenericInstanceType? interfaceContext,
+        MethodDefinition member, MethodDefinition inherited, TypeReference inheritedDeclaringType)
+    {
+        var forwarder = new MethodDefinition(interfaceReference.FullName + "." + member.Name,
+            MethodAttributes.Private | MethodAttributes.Final | MethodAttributes.Virtual | MethodAttributes.HideBySig |
+            MethodAttributes.NewSlot | (member.IsSpecialName ? MethodAttributes.SpecialName : 0),
+            _module.TypeSystem.Void) { HasThis = true };
+        type.Methods.Add(forwarder);
+        forwarder.CustomAttributes.Add(new CustomAttribute(_module.ImportReference(
+            typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute).GetConstructor(Type.EmptyTypes))));
+
+        var generics = new Dictionary<GenericParameter, GenericParameter>();
+        foreach (var parameter in member.GenericParameters)
+        {
+            var copy = new GenericParameter(parameter.Name, forwarder) { Attributes = parameter.Attributes };
+            forwarder.GenericParameters.Add(copy);
+            generics.Add(parameter, copy);
+        }
+        TypeReference Map(TypeReference type) =>
+            _module.ImportReference(ReplaceMethodGenerics(Substitute(type, interfaceContext), generics), forwarder);
+        foreach (var parameter in member.GenericParameters)
+            foreach (var constraint in parameter.Constraints)
+                generics[parameter].Constraints.Add(new GenericParameterConstraint(Map(constraint.ConstraintType)));
+        forwarder.ReturnType = Map(member.ReturnType);
+        foreach (var parameter in member.Parameters)
+            forwarder.Parameters.Add(new ParameterDefinition(parameter.Name, ParameterAttributes.None, Map(parameter.ParameterType)));
+        forwarder.Overrides.Add(_module.ImportReference(MemberOn(member, interfaceReference)));
+
+        var il = forwarder.Body.GetILProcessor();
+        il.Emit(OpCodes.Ldarg_0);
+        foreach (var parameter in forwarder.Parameters)
+            il.Emit(OpCodes.Ldarg, parameter);
+        var target = _module.ImportReference(MemberOn(inherited, inheritedDeclaringType));
+        if (target.HasGenericParameters)
+        {
+            var instance = new GenericInstanceMethod(target);
+            foreach (var parameter in forwarder.GenericParameters)
+                instance.GenericArguments.Add(parameter);
+            target = instance;
+        }
+        // A virtual inherited method may be overridden further down
+        il.Emit(inherited.IsVirtual && !inherited.IsFinal ? OpCodes.Callvirt : OpCodes.Call, target);
+        il.Emit(OpCodes.Ret);
+
+        if (!member.IsSetter ||
+            member.DeclaringType.Properties.FirstOrDefault(property => property.SetMethod == member) is not { } guarded)
+            return;
+        forwarder.SemanticsAttributes = MethodSemanticsAttributes.Setter;
+        type.Properties.Add(new PropertyDefinition(interfaceReference.FullName + "." + guarded.Name, PropertyAttributes.None,
+            forwarder.Parameters[^1].ParameterType) { HasThis = true, SetMethod = forwarder });
+    }
+
+    // A method as declared on a possibly generic instance of its type
+    private static MethodReference MemberOn(MethodDefinition method, TypeReference declaringType)
+    {
+        var reference = new MethodReference(method.Name, method.ReturnType, declaringType)
+        {
+            HasThis = method.HasThis,
+            ExplicitThis = method.ExplicitThis,
+            CallingConvention = method.CallingConvention
+        };
+        foreach (var parameter in method.GenericParameters)
+            reference.GenericParameters.Add(new GenericParameter(parameter.Name, reference));
+        foreach (var parameter in method.Parameters)
+            reference.Parameters.Add(new ParameterDefinition(parameter.ParameterType));
+        return reference;
+    }
+
     private int WeaveGuardedMembers()
     {
         var woven = 0;
@@ -115,17 +240,30 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
             if (typeGuarded && type.Methods.Any(method => method.IsConstructor && method.IsStatic && method.HasBody))
                 type.IsBeforeFieldInit = false;
 
+            var bases = BaseTypes(type).ToList();
+            var interfaces = Interfaces(type, null).ToList();
+            // Base classes' guards apply to methods; interfaces' guards to instance constructors. Interfaces' own
+            // guards don't apply to their default implementations.
+            var methodTypeGuarded = !type.IsInterface && (typeGuarded || bases.Any(@base => HasGuard(@base.Type)));
+            var constructorTypeGuarded = !type.IsInterface && (typeGuarded || interfaces.Any(@interface => HasGuard(@interface.Type)));
+
             var guardedSetters = type.Properties
-                .Where(property => property.SetMethod is not null && HasGuard(property))
+                .Where(property => property.SetMethod is not null && HasPropertyGuard(property, bases, interfaces))
                 .Select(property => property.SetMethod)
                 .ToHashSet();
 
             foreach (var method in type.Methods.Where(method => method.HasBody).ToList())
             {
                 var prologue = new List<Instruction>();
-                var guardsMethod = HasGuard(method) || (typeGuarded && IsGuardedByType(method));
+                var related = RelatedMethods(method, bases, interfaces).ToList();
+                var typeGuardsApply = method.IsConstructor
+                    ? method.IsStatic ? typeGuarded : constructorTypeGuarded
+                    : methodTypeGuarded;
+                var guardsMethod = HasGuard(method) || related.Any(HasGuard) || (typeGuardsApply && IsGuardedByType(method));
                 var guardedParameters = method.Parameters
-                    .Where(parameter => IsValueType(parameter.ParameterType) && HasGuard(parameter)).ToList();
+                    .Where(parameter => IsValueType(parameter.ParameterType) && (HasGuard(parameter) ||
+                        related.Any(inherited => HasGuard(inherited.Parameters[parameter.Index]))))
+                    .ToList();
 
                 if ((guardsMethod || guardedParameters.Count != 0) && GetAsyncReturn(method.ReturnType) is { } asyncReturn)
                 {
@@ -562,7 +700,9 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         if (!_fields.TryGetValue(definition, out var info))
         {
             var property = GetBackingFieldProperty(definition);
-            info = (HasGuard(definition) || (property is not null && HasGuard(property)), property);
+            info = (HasGuard(definition) || (property is not null &&
+                HasPropertyGuard(property, BaseTypes(property.DeclaringType).ToList(), Interfaces(property.DeclaringType, null).ToList())),
+                property);
             _fields[definition] = info;
         }
 
@@ -601,6 +741,73 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
     {
         return provider.HasCustomAttributes && provider.CustomAttributes.Any(attribute => IsGuardType(attribute.AttributeType));
     }
+
+    private bool HasPropertyGuard(PropertyDefinition property, List<(TypeDefinition Type, GenericInstanceType? Context)> bases,
+        List<(TypeDefinition Type, GenericInstanceType? Context)> interfaces) =>
+        HasGuard(property) || (property.SetMethod is { } setter && RelatedMethods(setter, bases, interfaces)
+            .Any(inherited => inherited.DeclaringType.Properties.FirstOrDefault(candidate => candidate.SetMethod == inherited) is { } guarded &&
+                HasGuard(guarded)));
+
+    /// <summary>
+    /// The base declarations a method overrides and the interface members it implements, whose guards it inherits.
+    /// Mirrors the runtime's resolution; a stray match only adds a check that finds no guards.
+    /// </summary>
+    private static IEnumerable<MethodDefinition> RelatedMethods(MethodDefinition method,
+        List<(TypeDefinition Type, GenericInstanceType? Context)> bases, List<(TypeDefinition Type, GenericInstanceType? Context)> interfaces)
+    {
+        foreach (var @override in method.Overrides)
+            if (TryResolve(@override) is { } explicitlyImplemented)
+                yield return explicitlyImplemented;
+        if (!method.IsVirtual || method.IsStatic)
+            yield break;
+
+        var signature = Signature(method, null);
+        var candidates = (method.IsNewSlot ? [] : bases).Concat(method.DeclaringType.IsInterface ? [] : interfaces);
+        foreach (var (type, context) in candidates)
+            foreach (var candidate in type.Methods.Where(candidate => candidate.IsVirtual && candidate.Name == method.Name &&
+                         Signature(candidate, context) == signature))
+                yield return candidate;
+    }
+
+    private static IEnumerable<(TypeDefinition Type, GenericInstanceType? Context)> BaseTypes(TypeDefinition type)
+    {
+        var reference = type.BaseType;
+        while (TryResolve(reference) is { } definition)
+        {
+            var context = reference as GenericInstanceType;
+            yield return (definition, context);
+            reference = definition.BaseType is null ? null : Substitute(definition.BaseType, context);
+        }
+    }
+
+    // A type's interfaces with their inherited interfaces, generic arguments expressed in the type's own terms
+    private static IEnumerable<(TypeDefinition Type, GenericInstanceType? Context)> Interfaces(TypeDefinition type, GenericInstanceType? context)
+    {
+        foreach (var implementation in type.Interfaces)
+        {
+            var reference = Substitute(implementation.InterfaceType, context);
+            if (TryResolve(reference) is not { } definition)
+                continue;
+            yield return (definition, reference as GenericInstanceType);
+            foreach (var inherited in Interfaces(definition, reference as GenericInstanceType))
+                yield return inherited;
+        }
+    }
+
+    private static string Signature(MethodDefinition method, GenericInstanceType? context) =>
+        method.GenericParameters.Count + "(" + string.Join(",", method.Parameters
+            .Select(parameter => SignatureName(Substitute(parameter.ParameterType, context)))) + ")";
+
+    // Method generic parameters are compared by position, since an implementation may rename them
+    private static string SignatureName(TypeReference type) => type switch
+    {
+        GenericParameter { Type: GenericParameterType.Method } parameter => "!!" + parameter.Position,
+        GenericInstanceType instance => SignatureName(instance.ElementType) + "<" +
+            string.Join(",", instance.GenericArguments.Select(SignatureName)) + ">",
+        ArrayType array => SignatureName(array.ElementType) + "[" + array.Rank + "]",
+        ByReferenceType reference => SignatureName(reference.ElementType) + "&",
+        _ => type.FullName
+    };
 
     private bool HasTestingOverride(MethodDefinition method)
     {
@@ -712,6 +919,9 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
 
             case ArrayType array:
                 return new ArrayType(Substitute(array.ElementType, context), array.Rank);
+
+            case ByReferenceType reference:
+                return new ByReferenceType(Substitute(reference.ElementType, context));
 
             default:
                 return type;

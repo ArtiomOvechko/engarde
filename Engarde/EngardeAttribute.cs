@@ -9,11 +9,17 @@ namespace Engarde;
 /// <list type="bullet">
 /// <item>Method / constructor: on each call.</item>
 /// <item>Class / struct / record: on every emitted instance/static constructor and ordinary method call,
-/// including implicit class constructors (property accessors and other compiler-generated methods are skipped).</item>
+/// including implicit class constructors (property accessors and other compiler-generated methods are skipped).
+/// Derived classes' ordinary methods are guarded too.</item>
+/// <item>Interface: on every instance constructor of a class or struct that implements it, directly or through
+/// another interface. A base class implementing it already checks it in its own constructor.</item>
 /// <item>Property: when the setter (or init) is given a non-empty value.</item>
 /// <item>Field: when a non-empty value is assigned.</item>
 /// <item>Parameter: when the method is called with a non-empty argument.</item>
 /// </list>
+/// Guards on a method, property or parameter also apply to the members overriding or implementing it, including
+/// methods inherited from a base class that doesn't implement the interface (when called through the interface).
+/// Inherited guards run in addition to the member's and type's own, even when they name the same features.
 /// A value is empty when it is null, default, an empty string or an empty collection.
 /// Features are evaluated and failures handled as registered with <c>AddEngarde</c>. To replace that for specific members, derive from:
 /// <list type="bullet">
@@ -26,8 +32,8 @@ namespace Engarde;
 /// is self-contained and can run without registering <c>AddEngarde</c>.
 /// </summary>
 [AttributeUsage(
-    AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method | AttributeTargets.Constructor
-        | AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.Parameter,
+    AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Interface | AttributeTargets.Method
+        | AttributeTargets.Constructor | AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.Parameter,
     AllowMultiple = true,
     Inherited = false)]
 public class EngardeAttribute(params string[] featureNames) : Attribute
