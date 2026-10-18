@@ -229,8 +229,16 @@ public static class EngardeChecks
         return enabled;
     }
 
-    private static bool HasEnabledGuards(Guards guards) =>
-        guards.Attributes.Any(guard => guard.FeatureNames.Any(featureName => IsGuardEnabled(guard, featureName)));
+    private static bool HasEnabledGuards(Guards guards)
+    {
+        foreach (var guard in guards.Attributes)
+        {
+            for (var index = 0; index < guard.FeatureNames.Count; index++)
+                if (IsGuardEnabled(guard, guard.FeatureNames[index]))
+                    return true;
+        }
+        return false;
+    }
 
     private static bool IsGuardEnabled(EngardeAttribute guard, string featureName) =>
         Volatile.Read(ref _guardOverride)?.Invoke(guard.GetType(), featureName) != false;
