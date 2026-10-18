@@ -11,8 +11,9 @@ namespace Engarde;
 /// <item>Class / struct / record: on every emitted instance/static constructor and ordinary method call,
 /// including implicit class constructors (property accessors and other compiler-generated methods are skipped).
 /// Derived classes' ordinary methods are guarded too.</item>
-/// <item>Interface: on every instance constructor of a class or struct that implements it, directly or through
-/// another interface. A base class implementing it already checks it in its own constructor.</item>
+/// <item>Interface: like a class guard, on every constructor and ordinary method of a class or struct that implements
+/// it, directly or through another interface, and on its default implementations. A base class implementing it
+/// already checks it in its own constructor.</item>
 /// <item>Property: when the setter (or init) is given a non-empty value.</item>
 /// <item>Field: when a non-empty value is assigned.</item>
 /// <item>Parameter: when the method is called with a non-empty argument.</item>

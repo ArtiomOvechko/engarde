@@ -242,10 +242,11 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
 
             var bases = BaseTypes(type).ToList();
             var interfaces = Interfaces(type, null).ToList();
-            // Base classes' guards apply to methods; interfaces' guards to instance constructors. Interfaces' own
-            // guards don't apply to their default implementations.
-            var methodTypeGuarded = !type.IsInterface && (typeGuarded || bases.Any(@base => HasGuard(@base.Type)));
-            var constructorTypeGuarded = !type.IsInterface && (typeGuarded || interfaces.Any(@interface => HasGuard(@interface.Type)));
+            // Base classes' and interfaces' guards apply to methods; instance constructors only check the interfaces
+            // their type introduces, since base constructors check the rest.
+            var methodTypeGuarded = typeGuarded || bases.Any(@base => HasGuard(@base.Type)) ||
+                interfaces.Concat(bases.SelectMany(@base => Interfaces(@base.Type, @base.Context))).Any(@interface => HasGuard(@interface.Type));
+            var constructorTypeGuarded = typeGuarded || interfaces.Any(@interface => HasGuard(@interface.Type));
 
             var guardedSetters = type.Properties
                 .Where(property => property.SetMethod is not null && HasPropertyGuard(property, bases, interfaces))

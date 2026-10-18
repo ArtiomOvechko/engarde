@@ -67,7 +67,7 @@ A guard is checked when a method or constructor is called, and when a property, 
 
 Guards are inherited down the type hierarchy:
 
-- An interface guard is checked when any implementing class or struct is constructed.
+- An interface guard works like a class guard on every implementing class or struct: it is checked on construction and on every method call, including the interface's default implementations.
 - A class guard also guards the methods of derived classes (it already ran in the base constructor).
 - A method, property or parameter guard also guards the members that override or implement it.
 
@@ -82,7 +82,7 @@ public interface IMyFeature
 [Engarde("my-feature-beta")]
 public sealed class MyFeature : IMyFeature // constructing it checks "my-feature-beta" and "my-feature"
 {
-    // checks "my-feature-run" and "my-feature-beta", plus "my-feature-option" for a non-zero option
+    // checks "my-feature-run", "my-feature-beta" and "my-feature", plus "my-feature-option" for a non-zero option
     public Task RunAsync(int option) => Task.CompletedTask;
 }
 ```

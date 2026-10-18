@@ -57,17 +57,21 @@ public sealed class InheritedGuardTests
     }
 
     [Fact]
-    public void Interface_guards_do_not_apply_to_implementors_methods_or_default_implementations()
+    public void Interface_guards_apply_to_implementors_methods_and_default_implementations()
     {
         using var session = new Session();
         var recorder = session.Recorder;
         var implementation = new DirectImplementation();
+        var derived = new DerivedImplementation();
         recorder.Checked.Clear();
 
         implementation.Run();
         ((IGuardedService)implementation).Default();
+        derived.Run();
 
-        Assert.Empty(recorder.Checked);
+        Assert.Equal(new[] { "iface", "iface", "iface" }, recorder.Checked);
+        Assert.Equal(typeof(IGuardedService), recorder.Missing[^2].Member.DeclaringType);
+        Assert.Equal(typeof(BaseImplementation), recorder.Missing[^1].Member.DeclaringType);
     }
 
     [Fact]

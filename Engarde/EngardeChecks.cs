@@ -336,9 +336,6 @@ public static class EngardeChecks
     private static IEnumerable<EngardeAttribute> TypeGuards(MethodBase method)
     {
         var type = method.DeclaringType!;
-        if (type.IsInterface)
-            yield break;
-
         IEnumerable<Type> sources = [type];
         if (method is ConstructorInfo { IsStatic: false })
         {
@@ -349,6 +346,7 @@ public static class EngardeChecks
         {
             for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
                 sources = sources.Append(baseType);
+            sources = sources.Concat(type.GetInterfaces().OrderBy(@interface => @interface.FullName, StringComparer.Ordinal));
         }
         foreach (var guard in sources.SelectMany(GetGuards))
             yield return guard;
