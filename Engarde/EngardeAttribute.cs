@@ -12,21 +12,18 @@ namespace Engarde;
 /// including implicit class constructors (property accessors and other compiler-generated methods are skipped).
 /// Derived classes' ordinary methods are guarded too.</item>
 /// <item>Interface: like a class guard, on every constructor and ordinary method of a class or struct that implements
-/// it, directly or through another interface, and on its default implementations. A base class implementing it
-/// already checks it in its own constructor.</item>
+/// it, directly or through another interface, and on its default implementations.</item>
 /// <item>Property: when the setter (or init) is given a non-empty value.</item>
 /// <item>Field: when a non-empty value is assigned.</item>
 /// <item>Parameter: when the method is called with a non-empty argument.</item>
 /// </list>
 /// Guards on a method, property or parameter also apply to the members overriding or implementing it, including
 /// methods inherited from a base class that doesn't implement the interface (when called through the interface).
-/// Inherited guards run in addition to the member's and type's own, even when they name the same features.
-/// A value is empty when it is null, default, an empty string or an empty collection.
 /// Features are evaluated and failures handled as registered with <c>AddEngarde</c>. To replace that for specific members, derive from:
 /// <list type="bullet">
-/// <item><see cref="EngardeAttribute{TFeatureScopeIdProvider, TFeatureScopeId}"/>: own feature scope id, registered feature store.</item>
-/// <item><see cref="EngardeAttribute{TFeatureStore}"/>: own feature store without a feature scope.</item>
-/// <item><see cref="EngardeAttribute{TFeatureStore, TFeatureScopeIdProvider, TFeatureScopeId}"/>: own feature store and feature scope id.</item>
+/// <item><see cref="EngardeAttribute{TFeatureScopeIdProvider, TFeatureScopeId}"/>: custom feature scope.</item>
+/// <item><see cref="EngardeAttribute{TFeatureStore}"/>: custom feature store.</item>
+/// <item><see cref="EngardeAttribute{TFeatureStore, TFeatureScopeIdProvider, TFeatureScopeId}"/>: custom feature scope and store.</item>
 /// <item>This attribute, overriding <see cref="IsEnabledAsync"/> and/or <see cref="OnFeatureMissing"/> directly.</item>
 /// </list>
 /// A guard that overrides both methods and does not resolve services from <see cref="EngardeContext.Services"/>
@@ -44,7 +41,7 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
     /// <summary>
     /// Whether the feature is enabled. Defaults to the registered feature store (with this attribute's feature scope id).
     /// </summary>
-    protected internal virtual ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected internal virtual ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         return context.IsEnabledByDefaultAsync(featureName, this);
     }
@@ -83,13 +80,13 @@ public abstract class EngardeAttribute<TFeatureScopeIdProvider, TFeatureScopeId>
     : EngardeAttribute(featureNames)
     where TFeatureScopeIdProvider : notnull
 {
-    protected abstract ValueTask<TFeatureScopeId> GetFeatureScopeIdAsync(TFeatureScopeIdProvider provider);
+    protected abstract ValueTask<TFeatureScopeId> GetScopeIdAsync(TFeatureScopeIdProvider provider, CancellationToken cancellationToken);
 
     private protected sealed override ScopeId ResolveFeatureScopeId(EngardeContext context)
     {
         return new ScopeId(
             typeof(TFeatureScopeId),
-            async () => await GetFeatureScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>()));
+            async () => await GetScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>(), context.CancellationToken));
     }
 }
 
@@ -106,13 +103,13 @@ public abstract class EngardeAttribute<TFeatureStore>(params string[] featureNam
     protected virtual TFeatureStore ResolveFeatureStore(IServiceProvider services) =>
         (services ?? throw EngardeContext.NoServices()).GetRequiredService<TFeatureStore>();
 
-    protected abstract ValueTask<bool> IsEnabledAsync(TFeatureStore store, string featureName);
+    protected abstract ValueTask<bool> IsEnabledAsync(TFeatureStore store, string featureName, CancellationToken cancellationToken);
 
-    protected internal sealed override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected internal sealed override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         if (context.ScopeIdOverride is not null)
             throw new InvalidOperationException($"{GetType().Name} evaluates features without a feature scope id");
-        return IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName);
+        return IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName, cancellationToken);
     }
 }
 
@@ -131,23 +128,25 @@ public abstract class EngardeAttribute<TFeatureStore, TFeatureScopeIdProvider, T
     protected virtual TFeatureStore ResolveFeatureStore(IServiceProvider services) =>
         (services ?? throw EngardeContext.NoServices()).GetRequiredService<TFeatureStore>();
 
-    protected abstract ValueTask<TFeatureScopeId> GetFeatureScopeIdAsync(TFeatureScopeIdProvider provider);
+    protected abstract ValueTask<TFeatureScopeId> GetScopeIdAsync(TFeatureScopeIdProvider provider, CancellationToken cancellationToken);
 
-    protected abstract ValueTask<bool> IsEnabledAsync(TFeatureStore store, string featureName, TFeatureScopeId scopeId);
+    protected abstract ValueTask<bool> IsEnabledAsync(
+        TFeatureStore store, string featureName, TFeatureScopeId scopeId, CancellationToken cancellationToken);
 
-    protected internal sealed override async ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected internal sealed override async ValueTask<bool> IsEnabledAsync(
+        string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         var scopeId = context.ScopeIdOverride is { } scopeIdOverride
             ? scopeIdOverride.Get(typeof(TFeatureScopeId), GetType())
-            : await GetFeatureScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>());
+            : await GetScopeIdAsync(context.GetRequiredService<TFeatureScopeIdProvider>(), cancellationToken);
 
-        return await IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName, (TFeatureScopeId)scopeId!);
+        return await IsEnabledAsync(ResolveFeatureStore(context.OptionalServices!), featureName, (TFeatureScopeId)scopeId!,
+            cancellationToken);
     }
 }
 
 internal sealed record ScopeId(Type Type, Func<ValueTask<object?>> Resolve);
 
-/// <summary>A feature scope id supplied to an inline query in place of the guard's or store's own resolution.</summary>
 internal sealed record ScopeIdOverride(object? Value)
 {
     internal object? Get(Type expected, Type guard)

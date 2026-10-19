@@ -16,12 +16,17 @@ public sealed class RuntimeTests
     [Fact]
     public void Inline_query_APIs_expose_only_ValueTask_bool_async_methods()
     {
-        var defaultQuery = Assert.Single(typeof(IEngarde).GetMethods(
+        var defaultQueries = typeof(IEngarde).GetMethods(
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance
-                | System.Reflection.BindingFlags.DeclaredOnly));
-        Assert.Equal(nameof(IEngarde.IsFeatureEnabledAsync), defaultQuery.Name);
-        Assert.Equal(typeof(ValueTask<bool>), defaultQuery.ReturnType);
-        Assert.Equal(typeof(string), Assert.Single(defaultQuery.GetParameters()).ParameterType);
+                | System.Reflection.BindingFlags.DeclaredOnly);
+        Assert.Equal(new[] { new[] { typeof(string) }, new[] { typeof(string), typeof(CancellationToken) } },
+            defaultQueries.Select(query => query.GetParameters().Select(parameter => parameter.ParameterType).ToArray())
+                .OrderBy(parameters => parameters.Length));
+        Assert.All(defaultQueries, query =>
+        {
+            Assert.Equal(nameof(IEngarde.IsFeatureEnabledAsync), query.Name);
+            Assert.Equal(typeof(ValueTask<bool>), query.ReturnType);
+        });
 
         foreach (var type in new[] { typeof(IVariantEngarde), typeof(IEnabledEngarde), typeof(IFixedVariantGuard) })
         {
@@ -160,8 +165,8 @@ public sealed class RuntimeTests
         var store = new Store();
         await using var services = new ServiceCollection().AddSingleton(store).AddScoped<ScopeProvider>()
             .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
-                provider => { provider.Resolutions++; return ValueTask.FromResult(provider.Id); },
-                (s, name, id) => { Assert.Equal(7, id); return s.Enabled(name); })
+                (s, name, id) => { Assert.Equal(7, id); return s.Enabled(name); },
+                provider => { provider.Resolutions++; return ValueTask.FromResult(provider.Id); })
                 .OnFeatureMissing((_, _) => { })).BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         using var active = Engarde.Engarde.BeginScope(services);
         Assert.True(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));
@@ -182,8 +187,8 @@ public sealed class RuntimeTests
         var scopeIds = new List<int>();
         await using var services = new ServiceCollection().AddSingleton(new Store()).AddSingleton(new ScopeProvider())
             .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
-                _ => ValueTask.FromResult(7),
-                (_, _, id) => { scopeIds.Add(id); return ValueTask.FromResult(id == 7); })
+                (_, _, id) => { scopeIds.Add(id); return ValueTask.FromResult(id == 7); },
+                _ => ValueTask.FromResult(7))
                 .OnFeatureMissing((_, _) => { })).BuildServiceProvider();
         using var active = Engarde.Engarde.BeginScope(services);
         Assert.True(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));
@@ -288,13 +293,13 @@ public enum FeatureVariant { Primary, Secondary }
 public sealed partial class VariantEngarde(FeatureVariant variant, params string[] featureNames)
     : EngardeAttribute<Store>(featureNames)
 {
-    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName) => store.Enabled(variant, featureName);
+    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, CancellationToken cancellationToken) => store.Enabled(variant, featureName);
 }
 
 public sealed partial class ScopedGuard(int id, params string[] featureNames)
     : EngardeAttribute<ScopeProvider, int>(featureNames)
 {
-    protected override ValueTask<int> GetFeatureScopeIdAsync(ScopeProvider provider) => ValueTask.FromResult(id);
+    protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken) => ValueTask.FromResult(id);
 }
 
 public partial class OverloadedGuard : EngardeAttribute
@@ -322,7 +327,7 @@ public sealed class DisabledFeatureException(string name) : Exception(name);
 
 public sealed class StandaloneGuardAttribute(bool enabled) : EngardeAttribute("standalone")
 {
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context) =>
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(enabled);
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
@@ -353,7 +358,7 @@ public sealed class HardcodedStoreGuardAttribute() : EngardeAttribute<HardcodedS
 
     protected override HardcodedStore ResolveFeatureStore(IServiceProvider services) => FeatureStore;
 
-    protected override ValueTask<bool> IsEnabledAsync(HardcodedStore store, string featureName) =>
+    protected override ValueTask<bool> IsEnabledAsync(HardcodedStore store, string featureName, CancellationToken cancellationToken) =>
         store.Check(featureName);
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
@@ -380,7 +385,7 @@ public partial class PermissionGuard : EngardeAttribute<PermissionStore>
 {
     public static PermissionStore FeatureStore { get; } = new();
     protected override PermissionStore ResolveFeatureStore(IServiceProvider services) => FeatureStore;
-    protected override ValueTask<bool> IsEnabledAsync(PermissionStore store, string featureName) =>
+    protected override ValueTask<bool> IsEnabledAsync(PermissionStore store, string featureName, CancellationToken cancellationToken) =>
         store.Check(featureName);
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
         throw new DisabledFeatureException(featureName);

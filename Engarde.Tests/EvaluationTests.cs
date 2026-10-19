@@ -13,11 +13,13 @@ public sealed class EvaluationTests
         var resolutions = 0;
         var calls = 0;
         await using var services = new ServiceCollection().AddSingleton(new Store()).AddScoped<ScopeProvider>()
-            .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(_ =>
-            {
-                Interlocked.Increment(ref resolutions);
-                return ValueTask.FromResult(7);
-            }, (_, _, id) => { Interlocked.Increment(ref calls); return ValueTask.FromResult(id == 7); })
+            .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
+                (_, _, id) => { Interlocked.Increment(ref calls); return ValueTask.FromResult(id == 7); },
+                _ =>
+                {
+                    Interlocked.Increment(ref resolutions);
+                    return ValueTask.FromResult(7);
+                })
             .OnFeatureMissing((_, _) => { })).BuildServiceProvider();
         using var active = Guard.BeginScope(services);
         var results = await Task.WhenAll(Enumerable.Range(0, 32)
@@ -83,33 +85,33 @@ public sealed class EvaluationTests
     private sealed class IdentityGuard : EngardeAttribute
     {
         public int Calls;
-        protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+        protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
         { Calls++; return ValueTask.FromResult(true); }
     }
 
     private sealed class AllowGuard : EngardeAttribute<Store>
     {
-        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName)
+        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, CancellationToken cancellationToken)
         { store.CustomCalls++; return ValueTask.FromResult(true); }
     }
 
     private sealed class DenyGuard : EngardeAttribute<Store>
     {
-        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName)
+        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, CancellationToken cancellationToken)
         { store.CustomCalls++; return ValueTask.FromResult(false); }
     }
 
     private sealed class AllowScopeGuard : EngardeAttribute<Store, ScopeProvider, int>
     {
-        protected override ValueTask<int> GetFeatureScopeIdAsync(ScopeProvider provider) => ValueTask.FromResult(7);
-        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, int scopeId)
+        protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken) => ValueTask.FromResult(7);
+        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, int scopeId, CancellationToken cancellationToken)
         { store.CustomCalls++; return ValueTask.FromResult(scopeId == 7); }
     }
 
     private sealed class DenyScopeGuard : EngardeAttribute<Store, ScopeProvider, int>
     {
-        protected override ValueTask<int> GetFeatureScopeIdAsync(ScopeProvider provider) => ValueTask.FromResult(8);
-        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, int scopeId)
+        protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken) => ValueTask.FromResult(8);
+        protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, int scopeId, CancellationToken cancellationToken)
         { store.CustomCalls++; return ValueTask.FromResult(scopeId == 7); }
     }
 }
@@ -118,11 +120,11 @@ public sealed class ValueSensitiveGuardAttribute() : EngardeAttribute("value-sen
 {
     public static int Calls;
 
-    protected override async ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected override async ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         Calls++;
         return Equals(context.Value, "allow")
-            && await base.IsEnabledAsync(featureName, context);
+            && await base.IsEnabledAsync(featureName, context, cancellationToken);
     }
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) { }

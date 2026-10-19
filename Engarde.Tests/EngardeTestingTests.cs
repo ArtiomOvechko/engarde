@@ -18,6 +18,15 @@ public sealed class EngardeTestingTests
     }
 
     [Fact]
+    public void Overrides_also_cover_test_class_constructors_and_field_initializers()
+    {
+        var subject = new ConstructorDisabledTest();
+
+        subject.Run();
+        Assert.Throws<InvalidOperationException>(() => new TestingGuardedService());
+    }
+
+    [Fact]
     public void Enable_all_restores_default_guard_behavior_below_a_disabled_base_class()
     {
         Assert.Throws<FirstTestingGuardException>(() => new EnabledDerivedTest().Run());
@@ -49,6 +58,7 @@ public sealed class EngardeTestingTests
         Assert.Equal("DisableEngardeAttribute", typeof(DisableEngardeAttribute).Name);
         Assert.Equal("EnableTestingFirstGuardAttribute", typeof(EnableTestingFirstGuardAttribute).Name);
         Assert.Equal("DisableITestingFirstGuardAttribute", typeof(DisableITestingFirstGuardAttribute).Name);
+        Assert.Equal("Engarde.Testing", typeof(DisableITestingFirstGuardAttribute).Namespace);
     }
 
     [Fact]
@@ -83,6 +93,16 @@ public sealed class EngardeTestingTests
         TestingSelectableGuardAttribute.Evaluated.Clear();
         new NamedSpecificDisabledTest().Run();
         Assert.Equal(new[] { "new-ui-experience" }, TestingSelectableGuardAttribute.Evaluated);
+    }
+
+    [DisableAllEngarde]
+    private sealed class ConstructorDisabledTest
+    {
+        private readonly TestingGuardedService _service = new();
+
+        public ConstructorDisabledTest() => TestingGuardedCode.First();
+
+        public void Run() => _service.Run();
     }
 
     [DisableAllEngarde]
@@ -164,7 +184,7 @@ public sealed class TestingFirstGuardAttribute : EngardeAttribute
 {
     public TestingFirstGuardAttribute() : base("first") { }
 
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context) =>
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(false);
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
@@ -175,7 +195,7 @@ public sealed class TestingSecondGuardAttribute : EngardeAttribute
 {
     public TestingSecondGuardAttribute() : base("second") { }
 
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context) =>
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(false);
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
@@ -186,7 +206,7 @@ public sealed class TestingSelectableGuardAttribute(params string[] featureNames
 {
     public static ConcurrentQueue<string> Evaluated { get; } = new();
 
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         Evaluated.Enqueue(featureName);
         return ValueTask.FromResult(true);
@@ -204,4 +224,15 @@ public static class TestingGuardedCode
     [TestingFirstGuard] public static async Task FirstAsync() => await Task.Yield();
     [Engarde("default")] public static void Default() { }
     [TestingSelectableGuard("weather-feature", "new-ui-experience")] public static void Selectable() { }
+}
+
+[Engarde("default")]
+public interface ITestingGuardedService
+{
+    void Run();
+}
+
+public sealed class TestingGuardedService : ITestingGuardedService
+{
+    public void Run() { }
 }

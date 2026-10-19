@@ -26,6 +26,52 @@ public sealed class GeneratorTests
         return (driver.GetRunResult(), output);
     }
 
+    private static bool WithoutToken(Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax method) =>
+        method.ParameterList.Parameters.LastOrDefault()?.Type?.ToString() != "global::System.Threading.CancellationToken";
+
+    [Fact]
+    public void Every_generated_query_has_a_cancellation_token_overload()
+    {
+        var (result, output) = Generate("""
+            namespace Consumer;
+            public sealed class Tenant;
+            public sealed partial class LevelGuard : EngardeAttribute<Tenant, string>
+            {
+                public LevelGuard() : base("level") { }
+                public LevelGuard(int cancellationToken) : base("level") { }
+                protected override System.Threading.Tasks.ValueTask<string> GetScopeIdAsync(
+                    Tenant tenant, System.Threading.CancellationToken cancellationToken) => new("tenant");
+            }
+            [GenerateFeatureGuards("feature")]
+            public partial class PermissionGuard : EngardeAttribute;
+            public static class Caller
+            {
+                public static async System.Threading.Tasks.ValueTask<bool> CheckAsync(System.Threading.CancellationToken token) =>
+                    await LevelGuard.CreateInstance().IsFeatureEnabledAsync(1, "tenant", token)
+                    && await FeaturePermissionGuard.CreateInstance().IsFeatureEnabledAsync(7, token);
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        foreach (var contract in result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                     .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>()))
+        {
+            var signatures = contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .Select(method => method.TypeParameterList + "(" + string.Join(",", method.ParameterList.Parameters) + ")")
+                .ToArray();
+            var queries = contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>().Where(WithoutToken).ToArray();
+            Assert.Equal(queries.Length * 2, signatures.Length);
+            foreach (var query in queries)
+            {
+                var parameters = query.ParameterList.Parameters.Select(parameter => parameter.ToString()).ToList();
+                var token = parameters.Any(parameter => parameter.EndsWith(" cancellationToken")) ? "_cancellationToken" : "cancellationToken";
+                Assert.Contains(query.TypeParameterList + "(" + string.Join(",",
+                    parameters.Append("global::System.Threading.CancellationToken " + token)) + ")", signatures);
+            }
+        }
+    }
+
     [Fact]
     public void Generates_scope_id_overloads_for_guards_with_their_own_scope_id_type()
     {
@@ -34,7 +80,7 @@ public sealed class GeneratorTests
             public sealed class Tenant;
             public abstract class TenantGuard(params string[] featureNames) : EngardeAttribute<Tenant, string>(featureNames)
             {
-                protected override System.Threading.Tasks.ValueTask<string> GetFeatureScopeIdAsync(Tenant tenant) => new("tenant");
+                protected override System.Threading.Tasks.ValueTask<string> GetScopeIdAsync(Tenant tenant, System.Threading.CancellationToken cancellationToken) => new("tenant");
             }
             public sealed partial class SettingsGuard() : TenantGuard("settings");
             public sealed partial class RuntimeGuard(params string[] featureNames) : TenantGuard(featureNames);
@@ -43,7 +89,7 @@ public sealed class GeneratorTests
             {
                 public OverlapGuard() : base("overlap") { }
                 public OverlapGuard(int level) : base("overlap") { }
-                protected override System.Threading.Tasks.ValueTask<int> GetFeatureScopeIdAsync(Tenant tenant) => new(1);
+                protected override System.Threading.Tasks.ValueTask<int> GetScopeIdAsync(Tenant tenant, System.Threading.CancellationToken cancellationToken) => new(1);
             }
             public static class Caller
             {
@@ -59,7 +105,7 @@ public sealed class GeneratorTests
         var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .ToDictionary(contract => contract.Identifier.ValueText, contract => contract.Members
-                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>().Where(WithoutToken)
                 .Select(method => string.Join(",", method.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText)))
                 .ToArray());
         Assert.Equal(new[] { "", "scopeId" }, contracts["ISettingsGuard"]);
@@ -87,7 +133,7 @@ public sealed class GeneratorTests
             public sealed partial class GenericGuard<TFeatureScopeId>() : EngardeAttribute("generic");
             public sealed partial class StoreGuard() : EngardeAttribute<object>("store")
             {
-                protected override System.Threading.Tasks.ValueTask<bool> IsEnabledAsync(object store, string featureName) => new(true);
+                protected override System.Threading.Tasks.ValueTask<bool> IsEnabledAsync(object store, string featureName, System.Threading.CancellationToken cancellationToken) => new(true);
             }
             public static class Caller
             {
@@ -103,7 +149,7 @@ public sealed class GeneratorTests
         var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .ToDictionary(contract => contract.Identifier.ValueText, contract => contract.Members
-                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>().Where(WithoutToken)
                 .Select(method => method.TypeParameterList + "(" + string.Join(",", method.ParameterList.Parameters.Select(parameter => parameter.ToString())) + ")")
                 .ToArray());
         Assert.Equal(new[] { "()", "<TFeatureScopeId>(TFeatureScopeId scopeId)" }, contracts["IFeaturePermissionGuard"]);
@@ -235,11 +281,11 @@ public sealed class GeneratorTests
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .ToDictionary(contract => contract.Identifier.ValueText);
         var unbound = Assert.Single(contracts["IUnboundGuard"].Members
-            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null);
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null && WithoutToken(method));
         Assert.Equal(new[] { "setting", "featureFlagName" }, unbound.ParameterList.Parameters
             .Select(parameter => parameter.Identifier.ValueText));
         var bound = Assert.Single(contracts["IBoundGuard"].Members
-            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null);
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(), method => method.TypeParameterList is null && WithoutToken(method));
         Assert.Equal(new[] { "setting" }, bound.ParameterList.Parameters
             .Select(parameter => parameter.Identifier.ValueText));
     }
@@ -263,7 +309,7 @@ public sealed class GeneratorTests
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .Single(type => type.Identifier.ValueText == "IGuard");
         var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
-            method => method.TypeParameterList is null);
+            method => method.TypeParameterList is null && WithoutToken(method));
         Assert.Empty(method.ParameterList.Parameters);
     }
 
@@ -304,7 +350,7 @@ public sealed class GeneratorTests
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
             .Single(type => type.Identifier.ValueText == "IFeaturePermissionGuard");
         var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
-            method => method.TypeParameterList is null);
+            method => method.TypeParameterList is null && WithoutToken(method));
         Assert.Empty(method.ParameterList.Parameters);
         var generatedGuard = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax>())
@@ -342,7 +388,7 @@ public sealed class GeneratorTests
                     .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
                 .Single(type => type.Identifier.ValueText == interfaceName);
             var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
-            method => method.TypeParameterList is null);
+            method => method.TypeParameterList is null && WithoutToken(method));
             Assert.Equal("int level", Assert.Single(method.ParameterList.Parameters).ToString());
         }
     }
@@ -377,7 +423,7 @@ public sealed class GeneratorTests
         var contract = tree.GetRoot().DescendantNodes()
             .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>().Single();
         var method = Assert.Single(contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
-            method => method.TypeParameterList is null);
+            method => method.TypeParameterList is null && WithoutToken(method));
         Assert.Equal("IEngarde", contract.Identifier.ValueText);
         Assert.Equal("IsFeatureEnabledAsync", method.Identifier.ValueText);
         Assert.Equal("string featureFlagName", Assert.Single(method.ParameterList.Parameters).ToString());

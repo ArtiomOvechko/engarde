@@ -88,7 +88,7 @@ public sealed class DelayedGuardAttribute() : EngardeAttribute("delayed")
 
     internal static void Complete(bool enabled) => completion.SetResult(enabled);
 
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context) =>
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken) =>
         new(completion.Task);
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>

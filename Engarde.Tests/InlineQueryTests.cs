@@ -10,8 +10,8 @@ public sealed class InlineQueryTests
     private static ServiceProvider Services(List<(string Flag, int Scope)> calls, List<string> missing) => new ServiceCollection()
         .AddSingleton(new Store()).AddScoped<ScopeProvider>()
         .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
-                provider => ValueTask.FromResult(provider.Id),
-                (_, flag, scope) => { calls.Add((flag, scope)); return ValueTask.FromResult(flag == "enabled" && scope == 7); })
+                (_, flag, scope) => { calls.Add((flag, scope)); return ValueTask.FromResult(flag == "enabled" && scope == 7); },
+                provider => ValueTask.FromResult(provider.Id))
             .OnFeatureMissing((flag, _) => missing.Add(flag)))
         .BuildServiceProvider();
 
@@ -75,6 +75,22 @@ public sealed class InlineQueryTests
     }
 
     [Fact]
+    public async Task Query_cancellation_tokens_reach_guards_and_cancelled_queries_throw()
+    {
+        await using var services = Services([], []);
+        using var active = Guard.BeginScope(services);
+        using var source = new CancellationTokenSource();
+        TokenGuard.Seen.Value = [];
+
+        Assert.True(await TokenGuard.CreateInstance().IsFeatureEnabledAsync(source.Token));
+        Assert.Equal(new[] { source.Token, source.Token }, TokenGuard.Seen.Value);
+
+        source.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => TokenGuard.CreateInstance().IsFeatureEnabledAsync(source.Token).AsTask());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Guard.CreateInstance().IsFeatureEnabledAsync("enabled", source.Token).AsTask());
+    }
+
+    [Fact]
     public async Task Scope_ids_are_rejected_when_the_store_has_no_feature_scope()
     {
         await using var services = new ServiceCollection().AddSingleton(new Store())
@@ -113,4 +129,21 @@ public partial class RegisteredScopeGuard : EngardeAttribute;
 public static class QuietGuarded
 {
     [DisabledQuietGuard] public static void Run() { }
+}
+
+public sealed partial class TokenGuard() : EngardeAttribute<Store, ScopeProvider, int>("enabled")
+{
+    public static readonly AsyncLocal<List<CancellationToken>> Seen = new();
+
+    protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken)
+    {
+        Seen.Value?.Add(cancellationToken);
+        return ValueTask.FromResult(7);
+    }
+
+    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, int scopeId, CancellationToken cancellationToken)
+    {
+        Seen.Value?.Add(cancellationToken);
+        return ValueTask.FromResult(true);
+    }
 }

@@ -201,10 +201,11 @@ public sealed class QueryStore(ConcurrentQueue<QueryStore>? observations = null)
 [SkipInlineFailures]
 public sealed partial class InjectedFlagGuard() : EngardeAttribute<QueryStore>("enabled")
 {
-    protected override ValueTask<bool> IsEnabledAsync(QueryStore store, string featureName) => store.Check(featureName);
+    protected override ValueTask<bool> IsEnabledAsync(QueryStore store, string featureName, CancellationToken cancellationToken) => store.Check(featureName);
 }
 
 public sealed class CustomInjectedFlagGuard : IInjectedFlagGuard
 {
     public ValueTask<bool> IsFeatureEnabledAsync() => ValueTask.FromResult(true);
+    public ValueTask<bool> IsFeatureEnabledAsync(CancellationToken cancellationToken) => ValueTask.FromResult(true);
 }

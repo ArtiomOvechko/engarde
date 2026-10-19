@@ -207,7 +207,7 @@ public sealed class RecordingGuard(params string[] featureNames) : EngardeAttrib
 {
     public static readonly AsyncLocal<List<string>> Checked = new();
 
-    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+    protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         Checked.Value?.Add(featureName);
         return ValueTask.FromResult(true);

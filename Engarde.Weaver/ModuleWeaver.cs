@@ -362,7 +362,8 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
     {
         var woven = 0;
         foreach (var method in _module.GetTypes().SelectMany(type => type.Methods)
-                     .Where(method => method.HasBody && !method.IsConstructor && HasTestingOverride(method)).ToList())
+                     .Where(method => method.HasBody && !(method.IsConstructor && method.IsStatic) && HasTestingOverride(method))
+                     .ToList())
         {
             WrapTestingScope(method);
             woven++;
