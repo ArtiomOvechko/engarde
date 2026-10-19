@@ -42,6 +42,8 @@ app.UseEngarde(); // checks use the request's services
 
 Use `UseFeatureStore<FeatureStore>((store, featureName) => ...)` when features don't depend on a scope. Every check calls the store; nothing is cached.
 
+`OnFeatureMissing` is optional. Without it nothing happens for a disabled feature: calls proceed, and property and field writes are skipped.
+
 ## Setup in apps without DI
 
 Derive from `EngardeAttribute<TStore>` and override `ResolveFeatureStore` to use a store that isn't resolved from DI.

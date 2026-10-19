@@ -42,7 +42,8 @@ public sealed class EngardeBuilder
 
     /// <summary>
     /// Called for each disabled feature. Throw to block a guarded call; returning lets the call proceed.
-    /// Disabled property and field writes are skipped after the handler returns.
+    /// Disabled property and field writes are skipped after the handler returns. Optional; without a handler
+    /// nothing happens for a disabled feature.
     /// </summary>
     public EngardeBuilder OnFeatureMissing(Action<string, EngardeContext> onFeatureMissing)
     {
@@ -56,8 +57,7 @@ public sealed class EngardeBuilder
         return new EngardeConfiguration(
             _featureStore ?? throw new InvalidOperationException(
                 $"Feature guards need a feature store, call {nameof(UseFeatureStore)}"),
-            _onFeatureMissing ?? throw new InvalidOperationException(
-                $"Feature guards need a handler for disabled features, call {nameof(OnFeatureMissing)}"));
+            _onFeatureMissing ?? (static (_, _) => { }));
     }
 }
 
