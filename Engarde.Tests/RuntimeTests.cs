@@ -38,6 +38,20 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public void Without_a_missing_feature_handler_disabled_calls_proceed_and_writes_are_skipped()
+    {
+        using var services = new ServiceCollection().AddSingleton(new Store())
+            .AddEngarde(builder => builder.UseFeatureStore<Store>((_, _) => ValueTask.FromResult(false)))
+            .BuildServiceProvider();
+        using var active = Engarde.Engarde.BeginScope(services);
+        var target = new UnhandledTarget();
+
+        Assert.Equal(1, target.Run());
+        target.Value = "skipped";
+        Assert.Null(target.Value);
+    }
+
+    [Fact]
     public async Task Inline_query_returns_before_asynchronous_store_finishes()
     {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -395,4 +409,10 @@ public sealed class GuardedDto
     public GuardedDto(string name) => Name = name;
     [Engarde("disabled")] public string? Name { get; set; }
     [Engarde("disabled")] public string? Field;
+}
+
+public sealed class UnhandledTarget
+{
+    [Engarde("disabled")] public int Run() => 1;
+    [Engarde("disabled")] public string? Value { get; set; }
 }
