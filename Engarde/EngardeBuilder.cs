@@ -11,13 +11,13 @@ public sealed class EngardeBuilder
     /// <summary>
     /// Evaluates features without a feature scope
     /// </summary>
-    public EngardeBuilder UseFeatureStore<TFeatureStore>(Func<TFeatureStore, string, ValueTask<bool>> isEnabled)
+    public EngardeBuilder UseFeatureStore<TFeatureStore>(Func<TFeatureStore, string, ValueTask<bool>> isEnabledAsync)
         where TFeatureStore : notnull
     {
         _featureStore = new FeatureStoreRegistration(
             null,
             null,
-            (services, featureName, _) => isEnabled(services.GetRequiredService<TFeatureStore>(), featureName));
+            (services, featureName, _) => isEnabledAsync(services.GetRequiredService<TFeatureStore>(), featureName));
 
         return this;
     }
@@ -26,16 +26,16 @@ public sealed class EngardeBuilder
     /// Evaluates features for a feature scope id taken from a scoped <typeparamref name="TFeatureScopeIdProvider"/>
     /// </summary>
     public EngardeBuilder UseFeatureStore<TFeatureStore, TFeatureScopeIdProvider, TFeatureScopeId>(
-        Func<TFeatureScopeIdProvider, ValueTask<TFeatureScopeId>> scopeIdFactory,
-        Func<TFeatureStore, string, TFeatureScopeId, ValueTask<bool>> isEnabled)
+        Func<TFeatureStore, string, TFeatureScopeId, ValueTask<bool>> isEnabledAsync,
+        Func<TFeatureScopeIdProvider, ValueTask<TFeatureScopeId>> getScopeIdAsync)
         where TFeatureStore : notnull
         where TFeatureScopeIdProvider : notnull
     {
         _featureStore = new FeatureStoreRegistration(
             typeof(TFeatureScopeId),
-            async services => await scopeIdFactory(services.GetRequiredService<TFeatureScopeIdProvider>()),
+            async services => await getScopeIdAsync(services.GetRequiredService<TFeatureScopeIdProvider>()),
             (services, featureName, scopeId) =>
-                isEnabled(services.GetRequiredService<TFeatureStore>(), featureName, (TFeatureScopeId)scopeId!));
+                isEnabledAsync(services.GetRequiredService<TFeatureStore>(), featureName, (TFeatureScopeId)scopeId!));
 
         return this;
     }
@@ -63,8 +63,8 @@ public sealed class EngardeBuilder
 
 internal sealed record FeatureStoreRegistration(
     Type? ScopeIdType,
-    Func<IServiceProvider, ValueTask<object?>>? ScopeIdFactory,
-    Func<IServiceProvider, string, object?, ValueTask<bool>> IsEnabled);
+    Func<IServiceProvider, ValueTask<object?>>? GetScopeIdAsync,
+    Func<IServiceProvider, string, object?, ValueTask<bool>> IsEnabledAsync);
 
 internal sealed record EngardeConfiguration(
     FeatureStoreRegistration FeatureStore,

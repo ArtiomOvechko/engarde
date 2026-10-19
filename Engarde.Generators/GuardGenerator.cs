@@ -40,6 +40,7 @@ public sealed class GuardGenerator : IIncrementalGenerator
                     public interface IEngarde
                     {
                         global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName);
+                        global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName, global::System.Threading.CancellationToken cancellationToken);
                     }
                     """, Encoding.UTF8));
         });
@@ -421,8 +422,19 @@ public sealed class GuardGenerator : IIncrementalGenerator
 
     private static string OpenArguments(int arity) => arity == 0 ? "" : "<" + new string(',', arity - 1) + ">";
 
+    // Each query also gets an overload taking a cancellation token
     private static void AppendQuery(StringBuilder contract, StringBuilder methods, List<string> parameters, string arguments,
         string? typeArguments = null, string? typeParameters = null)
+    {
+        var tokenName = "cancellationToken";
+        while (parameters.Any(parameter => parameter.EndsWith(" " + tokenName, StringComparison.Ordinal))) tokenName = "_" + tokenName;
+        AppendQueryMethod(contract, methods, parameters, arguments, typeArguments, typeParameters);
+        AppendQueryMethod(contract, methods, parameters.Concat(new[] { "global::System.Threading.CancellationToken " + tokenName }).ToList(),
+            arguments + ", " + tokenName, typeArguments, typeParameters);
+    }
+
+    private static void AppendQueryMethod(StringBuilder contract, StringBuilder methods, List<string> parameters, string arguments,
+        string? typeArguments, string? typeParameters)
     {
         var signature = "global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync" + typeParameters + "("
             + string.Join(", ", parameters) + ")";

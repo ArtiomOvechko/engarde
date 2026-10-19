@@ -13,8 +13,8 @@ public sealed class PerFlagGuardTests
         var resolutions = 0;
         await using var services = new ServiceCollection().AddSingleton(new Store()).AddScoped<ScopeProvider>()
             .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
-                provider => { resolutions++; return ValueTask.FromResult(provider.Id); },
-                (_, flag, scope) => { calls.Add((flag, scope)); return ValueTask.FromResult(flag == "enabled" && scope == 7); })
+                (_, flag, scope) => { calls.Add((flag, scope)); return ValueTask.FromResult(flag == "enabled" && scope == 7); },
+                provider => { resolutions++; return ValueTask.FromResult(provider.Id); })
                 .OnFeatureMissing((flag, _) => throw new DisabledFeatureException(flag)))
             .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         using var active = Engarde.Engarde.BeginScope(services);
@@ -38,8 +38,8 @@ public sealed class PerFlagGuardTests
         var scopes = new List<int>();
         await using var services = new ServiceCollection().AddSingleton(new Store()).AddSingleton(new ScopeProvider())
             .AddEngarde(builder => builder.UseFeatureStore<Store, ScopeProvider, int>(
-                _ => ValueTask.FromResult(7),
-                (_, flag, id) => { scopes.Add(id); return ValueTask.FromResult(flag == "enabled" && id == 7); })
+                (_, flag, id) => { scopes.Add(id); return ValueTask.FromResult(flag == "enabled" && id == 7); },
+                _ => ValueTask.FromResult(7))
                 .OnFeatureMissing((flag, _) => throw new DisabledFeatureException(flag))).BuildServiceProvider();
         using var active = Engarde.Engarde.BeginScope(services);
         Assert.True(await SelectedFlagGuard.CreateInstance().IsFeatureEnabledAsync(true));
@@ -101,30 +101,30 @@ public sealed partial class SelectedFlagGuard(bool enabled) : EngardeAttribute(e
 [SkipInlineFailures]
 public sealed partial class FixedScopeGuard(int id) : EngardeAttribute<ScopeProvider, int>("enabled")
 {
-    protected override ValueTask<int> GetFeatureScopeIdAsync(ScopeProvider provider) => ValueTask.FromResult(id);
+    protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken) => ValueTask.FromResult(id);
 }
 
 [SkipInlineFailures]
 public sealed partial class NamedScopeFlagGuard(string featurePool) : EngardeAttribute<ScopeProvider, int>("enabled")
 {
-    protected override ValueTask<int> GetFeatureScopeIdAsync(ScopeProvider provider) => ValueTask.FromResult(featurePool == "default" ? 7 : 8);
+    protected override ValueTask<int> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken) => ValueTask.FromResult(featurePool == "default" ? 7 : 8);
 }
 
 [SkipInlineFailures]
 public sealed partial class FixedVariantGuard(FeatureVariant variant) : EngardeAttribute<Store>("new-experience")
 {
-    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName) => store.Enabled(variant, featureName);
+    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, CancellationToken cancellationToken) => store.Enabled(variant, featureName);
 }
 
 [SkipInlineFailures]
 public sealed partial class FixedStoreScopeGuard(FeatureVariant variant) : EngardeAttribute<Store, ScopeProvider, FeatureVariant>("new-experience")
 {
-    protected override ValueTask<FeatureVariant> GetFeatureScopeIdAsync(ScopeProvider provider)
+    protected override ValueTask<FeatureVariant> GetScopeIdAsync(ScopeProvider provider, CancellationToken cancellationToken)
     {
         provider.Resolutions++;
         return ValueTask.FromResult(variant);
     }
-    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, FeatureVariant scopeId) => store.Enabled(scopeId, featureName);
+    protected override ValueTask<bool> IsEnabledAsync(Store store, string featureName, FeatureVariant scopeId, CancellationToken cancellationToken) => store.Enabled(scopeId, featureName);
 }
 
 public static class PerFlagHandlers

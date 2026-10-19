@@ -28,6 +28,10 @@ public sealed class EngardeContext
     /// <summary>The services for this check, or null when guards run without <c>AddEngarde</c></summary>
     internal IServiceProvider? OptionalServices { get; }
 
+    internal const string TestingHint =
+        "If you encounter this error in your unit tests, please use En-Garde.Testing (read more here: " +
+        "https://www.nuget.org/packages/En-Garde#:~:text=ServiceLifetime.Singleton).-,Testing,-dotnet%20add%20package)";
+
     internal static InvalidOperationException NoServices() =>
         new("Feature guards have no services, register them with AddEngarde");
 
@@ -45,6 +49,8 @@ public sealed class EngardeContext
     /// <summary>The feature scope id passed to an inline query, used instead of resolving one</summary>
     internal ScopeIdOverride? ScopeIdOverride { get; }
 
+    internal CancellationToken CancellationToken => _evaluation.CancellationToken;
+
     internal T GetRequiredService<T>() where T : notnull => Services.GetRequiredService<T>();
 
     internal async ValueTask<bool> IsEnabledByDefaultAsync(string featureName, EngardeAttribute guard)
@@ -52,7 +58,7 @@ public sealed class EngardeContext
         var store = RequiredConfiguration.FeatureStore;
         if (ScopeIdOverride is not null && store.ScopeIdType is null)
             throw new InvalidOperationException("The registered feature store evaluates features without a feature scope id");
-        var scopeId = store.ScopeIdType is null ? null : await GetFeatureScopeIdAsync(guard, store);
+        var scopeId = store.ScopeIdType is null ? null : await GetScopeIdAsync(guard, store);
 
         return await _evaluation.CheckStoreAsync(store, featureName, scopeId).ConfigureAwait(false);
     }
@@ -62,13 +68,13 @@ public sealed class EngardeContext
         RequiredConfiguration.OnFeatureMissing(featureName, this);
     }
 
-    private async ValueTask<object?> GetFeatureScopeIdAsync(EngardeAttribute guard, FeatureStoreRegistration store)
+    private async ValueTask<object?> GetScopeIdAsync(EngardeAttribute guard, FeatureStoreRegistration store)
     {
         if (guard.GetFeatureScopeId(this) is not { } custom)
         {
             if (ScopeIdOverride is not null)
                 return ScopeIdOverride.Get(store.ScopeIdType!, guard.GetType());
-            return await store.ScopeIdFactory!(Services).ConfigureAwait(false);
+            return await store.GetScopeIdAsync!(Services).ConfigureAwait(false);
         }
 
         if (custom.Type != store.ScopeIdType)
@@ -84,5 +90,6 @@ public sealed class EngardeContext
 
     private EngardeConfiguration RequiredConfiguration => _configuration
         ?? throw new InvalidOperationException(
-            "This guard uses the default feature store or missing-feature handler. Register it with AddEngarde, or override both methods in the guard.");
+            "This guard uses the default feature store or missing-feature handler. Register it with AddEngarde, or override both methods in the guard. "
+            + TestingHint);
 }

@@ -105,7 +105,7 @@ public sealed class FieldAssignmentPerformanceTests(ITestOutputHelper output)
     {
         public const string FeatureFlagName = "FeatureManagement:FieldAssignment";
 
-        protected override ValueTask<bool> IsEnabledAsync(IConfiguration store, string featureName) =>
+        protected override ValueTask<bool> IsEnabledAsync(IConfiguration store, string featureName, CancellationToken cancellationToken) =>
             ValueTask.FromResult(bool.TryParse(store[featureName], out var enabled) && enabled);
     }
 

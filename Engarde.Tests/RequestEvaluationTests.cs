@@ -165,8 +165,8 @@ public sealed class RequestEvaluationTests
     private static ServiceProvider Services(ConcurrentQueue<(RequestStore Store, int Id)> calls, List<EngardeContext> missing) =>
         new ServiceCollection().AddScoped(_ => new RequestUser { Id = 7 }).AddScoped<RequestStore>()
             .AddEngarde(builder => builder.UseFeatureStore<RequestStore, RequestUser, int>(
-                user => ValueTask.FromResult(user.Id),
-                (store, flag, id) => { calls.Enqueue((store, id)); return ValueTask.FromResult(flag == "enabled" && id == 7); })
+                (store, flag, id) => { calls.Enqueue((store, id)); return ValueTask.FromResult(flag == "enabled" && id == 7); },
+                user => ValueTask.FromResult(user.Id))
                 .OnFeatureMissing((_, context) => missing.Add(context)))
             .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
 

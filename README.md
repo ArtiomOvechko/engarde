@@ -31,8 +31,8 @@ builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddSingleton<FeatureStore>();
 builder.Services.AddEngarde(engarde => engarde
     .UseFeatureStore<FeatureStore, CurrentUser, string>(
-        user => ValueTask.FromResult(user.Id),
-        (store, featureName, userId) => store.IsEnabledAsync(featureName, userId))
+        (store, featureName, userId) => store.IsEnabledAsync(featureName, userId),
+        user => ValueTask.FromResult(user.Id))
     .OnFeatureMissing((featureName, context) =>
         throw new InvalidOperationException($"'{featureName}' is required by {context.Member.Name}")));
 
@@ -55,7 +55,7 @@ public sealed partial class AppWithoutDiCustomGuard(params string[] featureNames
 {
     protected override FeatureStore ResolveFeatureStore(IServiceProvider services) => new FeatureStore();
 
-    protected override ValueTask<bool> IsEnabledAsync(FeatureStore store, string featureName) =>
+    protected override ValueTask<bool> IsEnabledAsync(FeatureStore store, string featureName, CancellationToken cancellationToken) =>
         store.IsEnabledAsync(featureName, "app");
 
     protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
@@ -103,6 +103,8 @@ public sealed class Navigation(IEngarde engarde)
 ```
 
 `IEngarde` only reports the status and never calls `OnFeatureMissing`.
+
+Every `IsFeatureEnabledAsync`, including those of generated guard interfaces, has an overload taking a `CancellationToken`. Custom guards receive it in the async methods they override (`IsEnabledAsync`, `GetScopeIdAsync`); attribute checks pass `CancellationToken.None`.
 
 ## Custom guards
 
@@ -154,7 +156,7 @@ public sealed partial class MenuGuard() : EngardeAttribute("menu");
 public sealed partial class UserGuard(params string[] featureNames)
     : EngardeAttribute<CurrentUser, string>(featureNames)
 {
-    protected override ValueTask<string> GetFeatureScopeIdAsync(CurrentUser user) =>
+    protected override ValueTask<string> GetScopeIdAsync(CurrentUser user, CancellationToken cancellationToken) =>
         ValueTask.FromResult(user.Id);
 }
 ```
@@ -191,4 +193,4 @@ public sealed class NewExperienceTests : UnitTestBase
 }
 ```
 
-Each guard gets `Enable<Guard>` and `Disable<Guard>` attributes for test classes and methods, optionally filtered by feature names.
+Each guard gets `Enable<Guard>` and `Disable<Guard>` attributes for test classes and methods, optionally filtered by feature names. They are generated in the `Engarde.Testing` namespace, or in the guard's namespace when two guards share a name. They also cover the test class constructor and field initializers, so services created there are checked with the same overrides.

@@ -37,24 +37,33 @@ public sealed class TestingOverrideGenerator : IIncrementalGenerator
                 .Any(reference => SymbolEqualityComparer.Default.Equals(reference, root.ContainingAssembly))))
             .Concat(new[] { compilation.Assembly });
         var generated = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var guard in assemblies.SelectMany(assembly => Types(assembly.GlobalNamespace))
-                     .Where(type => !SymbolEqualityComparer.Default.Equals(type, root) && IsGuard(type, root)))
-        {
-            Generate(output, compilation, guard, generated);
-        }
+        var guards = assemblies.SelectMany(assembly => Types(assembly.GlobalNamespace))
+            .Where(type => !SymbolEqualityComparer.Default.Equals(type, root) && IsGuard(type, root))
+            .ToList();
+        // Overrides go next to DisableAllEngarde, unless guards in different namespaces would share a name
+        var nameCounts = guards.SelectMany(Names).GroupBy(name => name, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        foreach (var guard in guards)
+            Generate(output, compilation, guard, nameCounts, generated);
     }
 
-    private static void Generate(SourceProductionContext output, Compilation compilation, INamedTypeSymbol guard,
-        HashSet<string> generated)
+    private static string[] Names(INamedTypeSymbol guard)
     {
         var stem = guard.Name.EndsWith("Attribute", StringComparison.Ordinal)
             ? guard.Name.Substring(0, guard.Name.Length - "Attribute".Length)
             : guard.Name;
         for (var containing = guard.ContainingType; containing is not null; containing = containing.ContainingType)
             stem = containing.Name + stem;
-        foreach (var name in new[] { stem, "I" + stem })
+        return new[] { stem, "I" + stem };
+    }
+
+    private static void Generate(SourceProductionContext output, Compilation compilation, INamedTypeSymbol guard,
+        Dictionary<string, int> nameCounts, HashSet<string> generated)
+    {
+        foreach (var name in Names(guard))
         {
-            var ns = guard.ContainingNamespace.IsGlobalNamespace ? "" : guard.ContainingNamespace.ToDisplayString();
+            var ns = nameCounts[name] == 1 ? "Engarde.Testing"
+                : guard.ContainingNamespace.IsGlobalNamespace ? "" : guard.ContainingNamespace.ToDisplayString();
             var identity = ns + "." + name;
             if (!generated.Add(identity)
                 || compilation.GetTypeByMetadataName((ns.Length == 0 ? "" : ns + ".") + "Enable" + name + "Attribute") is not null)

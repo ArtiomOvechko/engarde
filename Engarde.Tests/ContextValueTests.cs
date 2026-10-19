@@ -92,7 +92,7 @@ public sealed class ContextValueTests
 
     private sealed class InspectingGuard(Action<EngardeContext> observe) : EngardeAttribute("disabled")
     {
-        protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context)
+        protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
         {
             observe(context);
             return ValueTask.FromResult(false);
