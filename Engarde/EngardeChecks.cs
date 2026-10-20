@@ -20,12 +20,35 @@ public static class EngardeChecks
     private static readonly ConcurrentDictionary<(nint, nint, int), Guards> ParameterGuardsCache = new();
     private static readonly ConcurrentDictionary<(nint, nint), Guards> PropertyGuardsCache = new();
     private static readonly ConcurrentDictionary<(nint, nint), Guards> FieldGuardsCache = new();
+    private static readonly AsyncLocal<SuppressedGuard?> Suppressed = new();
     private static Func<Type, string, bool?>? _guardOverride;
 
     /// <summary>Installs the optional guard override supplied by Engarde.Testing.</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static void SetGuardOverride(Func<Type, string, bool?>? guardOverride) =>
         Volatile.Write(ref _guardOverride, guardOverride);
+
+    internal static object ResolveGuardedService(
+        IServiceProvider services, EngardeAttribute guard, Func<object> createPrimary)
+    {
+        var enabled = Wait((services, guard), static state => EvaluateTypeGuardAsync(state.services, state.guard));
+        using var suppression = Suppress(new FallbackInvocation(null, null, guard.GetType(), guard.FeatureNames.ToArray()));
+        if (enabled)
+            return createPrimary();
+        return services.GetService(guard.FallbackType!)
+            ?? throw new InvalidOperationException(
+                $"Fallback type '{guard.FallbackType}' is not registered in the active DI scope.");
+    }
+
+    private static async ValueTask<bool> EvaluateTypeGuardAsync(IServiceProvider services, EngardeAttribute guard)
+    {
+        await using var evaluation = EngardeEvaluation.Begin(services, false);
+        foreach (var featureName in guard.FeatureNames)
+            if (IsGuardEnabled(guard, featureName) &&
+                !await guard.EvaluateAsync(evaluation, featureName, guard.FallbackType!, null, null).ConfigureAwait(false))
+                return false;
+        return true;
+    }
 
     public static void CheckMethod(RuntimeMethodHandle method, RuntimeTypeHandle type)
     {
@@ -95,37 +118,76 @@ public static class EngardeChecks
         RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments) =>
         CheckValueTaskMethodCore<TResult>(target, arguments, implementation, method, type, genericArguments);
 
+    public static void InvokeMethod(
+        object? target, object?[] arguments, RuntimeMethodHandle implementation,
+        RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments) =>
+        Wait((target, arguments, implementation, method, type, genericArguments), static state =>
+            InvokeMethodCore<object?>(state.target, state.arguments, state.implementation, state.method, state.type,
+                state.genericArguments, false));
+
+    public static TResult InvokeMethod<TResult>(
+        object? target, object?[] arguments, RuntimeMethodHandle implementation,
+        RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments) =>
+        Wait((target, arguments, implementation, method, type, genericArguments), static state =>
+            InvokeMethodCore<TResult>(state.target, state.arguments, state.implementation, state.method, state.type,
+                state.genericArguments, true));
+
     private static async Task CheckTaskMethodCore(
         object? target, object?[] arguments, RuntimeMethodHandle implementation,
         RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments)
     {
-        await ValidateMethodAsync(method, type, arguments).ConfigureAwait(false);
-        await ((Task)Invoke(implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        var fallback = await ValidateMethodAsync(evaluation, method, type, arguments, target, genericArguments).ConfigureAwait(false);
+        using var suppression = Suppress(fallback);
+        await ((Task)InvokeSelected(fallback, implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
     }
 
     private static async Task<TResult> CheckTaskMethodCore<TResult>(
         object? target, object?[] arguments, RuntimeMethodHandle implementation,
         RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments)
     {
-        await ValidateMethodAsync(method, type, arguments).ConfigureAwait(false);
-        return await ((Task<TResult>)Invoke(implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        var fallback = await ValidateMethodAsync(evaluation, method, type, arguments, target, genericArguments).ConfigureAwait(false);
+        using var suppression = Suppress(fallback);
+        return await ((Task<TResult>)InvokeSelected(fallback, implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
     }
 
     private static async ValueTask CheckValueTaskMethodCore(
         object? target, object?[] arguments, RuntimeMethodHandle implementation,
         RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments)
     {
-        await ValidateMethodAsync(method, type, arguments).ConfigureAwait(false);
-        await ((ValueTask)Invoke(implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        var fallback = await ValidateMethodAsync(evaluation, method, type, arguments, target, genericArguments).ConfigureAwait(false);
+        using var suppression = Suppress(fallback);
+        await ((ValueTask)InvokeSelected(fallback, implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
     }
 
     private static async ValueTask<TResult> CheckValueTaskMethodCore<TResult>(
         object? target, object?[] arguments, RuntimeMethodHandle implementation,
         RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments)
     {
-        await ValidateMethodAsync(method, type, arguments).ConfigureAwait(false);
-        return await ((ValueTask<TResult>)Invoke(implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
+        await using var evaluation = EngardeEvaluation.Begin();
+        var fallback = await ValidateMethodAsync(evaluation, method, type, arguments, target, genericArguments).ConfigureAwait(false);
+        using var suppression = Suppress(fallback);
+        return await ((ValueTask<TResult>)InvokeSelected(fallback, implementation, type, genericArguments, target, arguments)!).ConfigureAwait(false);
     }
+
+    private static async ValueTask<TResult> InvokeMethodCore<TResult>(
+        object? target, object?[] arguments, RuntimeMethodHandle implementation,
+        RuntimeMethodHandle method, RuntimeTypeHandle type, Type[]? genericArguments, bool hasResult)
+    {
+        await using var evaluation = EngardeEvaluation.Begin();
+        var fallback = await ValidateMethodAsync(evaluation, method, type, arguments, target, genericArguments).ConfigureAwait(false);
+        using var suppression = Suppress(fallback);
+        var result = InvokeSelected(fallback, implementation, type, genericArguments, target, arguments);
+        return hasResult ? (TResult)result! : default!;
+    }
+
+    private static object? InvokeSelected(FallbackInvocation? fallback, RuntimeMethodHandle implementation,
+        RuntimeTypeHandle type, Type[]? genericArguments, object? target, object?[] arguments) =>
+        fallback is null
+            ? Invoke(implementation, type, genericArguments, target, arguments)
+            : Invoke(fallback.Method!, fallback.Target, arguments);
 
     private static object? Invoke(
         RuntimeMethodHandle implementation, RuntimeTypeHandle type, Type[]? genericArguments,
@@ -135,6 +197,11 @@ public static class EngardeChecks
         if (method.IsGenericMethodDefinition)
             method = method.MakeGenericMethod(genericArguments!);
 
+        return Invoke(method, target, arguments);
+    }
+
+    private static object? Invoke(MethodInfo method, object? target, object?[] arguments)
+    {
         try
         {
             return method.Invoke(target, arguments);
@@ -161,7 +228,7 @@ public static class EngardeChecks
 
     private static bool Validate(Guards guards, object? value)
     {
-        if (!HasEnabledGuards(guards))
+        if (!HasEnabledGuards(guards, value))
             return true;
 
         return Wait((guards, value), static state => ValidateAsync(state.guards, state.value));
@@ -182,22 +249,22 @@ public static class EngardeChecks
         return task.IsCompletedSuccessfully ? task.Result : task.AsTask().GetAwaiter().GetResult();
     }
 
-    private static async ValueTask ValidateMethodAsync(
-        RuntimeMethodHandle method, RuntimeTypeHandle type, object?[] arguments)
+    private static async ValueTask<FallbackInvocation?> ValidateMethodAsync(
+        EngardeEvaluation evaluation, RuntimeMethodHandle method, RuntimeTypeHandle type, object?[] arguments,
+        object? target, Type[]? genericArguments)
     {
         var methodGuards = GetMethodGuards(method, type);
         var parameterGuards = new Guards[arguments.Length];
-        var hasEnabledGuards = HasEnabledGuards(methodGuards);
+        var hasEnabledGuards = HasEnabledGuards(methodGuards, null);
         for (var index = 0; index < arguments.Length; index++)
         {
             parameterGuards[index] = GetParameterGuards(method, type, index);
-            hasEnabledGuards |= !IsEmptyObject(arguments[index]) && HasEnabledGuards(parameterGuards[index]);
+            hasEnabledGuards |= !IsEmptyObject(arguments[index]) && HasEnabledGuards(parameterGuards[index], arguments[index]);
         }
         if (!hasEnabledGuards)
-            return;
+            return null;
 
-        await using var evaluation = EngardeEvaluation.Begin();
-        await ValidateAsync(evaluation, methodGuards, null).ConfigureAwait(false);
+        var fallback = await ValidateMethodGuardsAsync(evaluation, methodGuards, target, genericArguments).ConfigureAwait(false);
 
         for (var index = 0; index < arguments.Length; index++)
         {
@@ -205,6 +272,75 @@ public static class EngardeChecks
             if (!IsEmptyObject(value))
                 await ValidateAsync(evaluation, parameterGuards[index], value).ConfigureAwait(false);
         }
+        return fallback;
+    }
+
+    private static async ValueTask<FallbackInvocation?> ValidateMethodGuardsAsync(
+        EngardeEvaluation evaluation, Guards guards, object? target, Type[]? genericArguments)
+    {
+        EngardeContext? context = null;
+        FallbackInvocation? fallback = null;
+        foreach (var guard in guards.Attributes)
+        {
+            for (var index = 0; index < guard.FeatureNames.Count; index++)
+            {
+                var featureName = guard.FeatureNames[index];
+                if (!IsGuardEnabled(guard, featureName) ||
+                    await guard.EvaluateAsync(evaluation, featureName, guards.Member, null, null).ConfigureAwait(false))
+                    continue;
+
+                var resolved = ResolveFallback(evaluation, (MethodInfo)guards.Member, guard, featureName, target, genericArguments);
+                fallback ??= resolved;
+                if (resolved is not null)
+                    continue;
+                context ??= evaluation.CreateContext(guards.Member, null);
+                guard.OnFeatureMissing(featureName, context);
+            }
+        }
+        return fallback;
+    }
+
+    private static FallbackInvocation? ResolveFallback(EngardeEvaluation evaluation, MethodInfo guarded,
+        EngardeAttribute guard, string featureName, object? target, Type[]? genericArguments)
+    {
+        var fallbackType = guard.FallbackType;
+        if (fallbackType is null)
+            return null;
+
+        var fallbackName = guard.FallbackMethod ?? guarded.Name;
+        var source = guarded.IsGenericMethodDefinition && genericArguments is not null
+            ? guarded.MakeGenericMethod(genericArguments)
+            : guarded;
+        MethodInfo? fallback = null;
+        foreach (var candidate in fallbackType.GetMethods(DeclaredMembers).Where(method => method.Name == fallbackName))
+        {
+            MethodInfo current = candidate;
+            if (candidate.IsGenericMethodDefinition)
+            {
+                if (genericArguments is null || candidate.GetGenericArguments().Length != genericArguments.Length)
+                    continue;
+                current = candidate.MakeGenericMethod(genericArguments);
+            }
+            if (current.ReturnType != source.ReturnType ||
+                !current.GetParameters().Select(parameter => parameter.ParameterType)
+                    .SequenceEqual(source.GetParameters().Select(parameter => parameter.ParameterType)))
+                continue;
+            fallback = current;
+            break;
+        }
+        if (fallback is null)
+            return null;
+
+        object? fallbackTarget;
+        if (fallback.IsStatic)
+            fallbackTarget = null;
+        else if (guard.FallbackMethod is not null && fallbackType.IsInstanceOfType(target))
+            fallbackTarget = target;
+        else
+            fallbackTarget = evaluation.Services?.GetService(fallbackType);
+        return fallback.IsStatic || fallbackTarget is not null
+            ? new FallbackInvocation(fallback, fallbackTarget, guard.GetType(), guard.FeatureNames.ToArray())
+            : null;
     }
 
     private static async ValueTask<bool> ValidateAsync(EngardeEvaluation evaluation, Guards guards, object? value)
@@ -216,7 +352,7 @@ public static class EngardeChecks
             for (var index = 0; index < guard.FeatureNames.Count; index++)
             {
                 var featureName = guard.FeatureNames[index];
-                if (!IsGuardEnabled(guard, featureName))
+                if (!MatchesGuardedValue(guard, value) || !IsGuardEnabled(guard, featureName))
                     continue;
                 if (!await guard.EvaluateAsync(evaluation, featureName, guards.Member, value, null).ConfigureAwait(false))
                 {
@@ -229,10 +365,12 @@ public static class EngardeChecks
         return enabled;
     }
 
-    private static bool HasEnabledGuards(Guards guards)
+    private static bool HasEnabledGuards(Guards guards, object? value)
     {
         foreach (var guard in guards.Attributes)
         {
+            if (!MatchesGuardedValue(guard, value))
+                continue;
             for (var index = 0; index < guard.FeatureNames.Count; index++)
                 if (IsGuardEnabled(guard, guard.FeatureNames[index]))
                     return true;
@@ -240,8 +378,28 @@ public static class EngardeChecks
         return false;
     }
 
+    private static bool MatchesGuardedValue(EngardeAttribute guard, object? value) =>
+        !guard.HasGuardedValue || Equals(guard.GuardedValue, value);
+
     private static bool IsGuardEnabled(EngardeAttribute guard, string featureName) =>
+        !IsSuppressed(guard.GetType(), featureName) &&
         Volatile.Read(ref _guardOverride)?.Invoke(guard.GetType(), featureName) != false;
+
+    private static bool IsSuppressed(Type guardType, string featureName)
+    {
+        for (var current = Suppressed.Value; current is not null; current = current.Previous)
+            if (current.GuardType == guardType && current.FeatureNames.Contains(featureName))
+                return true;
+        return false;
+    }
+
+    private static IDisposable Suppress(FallbackInvocation? fallback)
+    {
+        if (fallback is null) return EmptyDisposable.Instance;
+        var previous = Suppressed.Value;
+        Suppressed.Value = new(fallback.GuardType, fallback.FeatureNames, previous);
+        return new Scope(() => Suppressed.Value = previous);
+    }
 
     private static Guards GetMethodGuards(RuntimeMethodHandle method, RuntimeTypeHandle type) =>
         MethodGuardsCache.GetOrAdd((method.Value, type.Value), static (_, handles) =>
@@ -356,4 +514,12 @@ public static class EngardeChecks
         left.MetadataToken == right.MetadataToken && left.Module == right.Module && left.DeclaringType == right.DeclaringType;
 
     private sealed record Guards(MemberInfo Member, EngardeAttribute[] Attributes);
+    private sealed record FallbackInvocation(MethodInfo? Method, object? Target, Type GuardType, string[] FeatureNames);
+    private sealed record SuppressedGuard(Type GuardType, string[] FeatureNames, SuppressedGuard? Previous);
+    private sealed class Scope(Action dispose) : IDisposable { public void Dispose() => dispose(); }
+    private sealed class EmptyDisposable : IDisposable
+    {
+        public static readonly EmptyDisposable Instance = new();
+        public void Dispose() { }
+    }
 }

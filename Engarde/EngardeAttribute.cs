@@ -38,6 +38,53 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
 {
     public virtual IReadOnlyList<string> FeatureNames { get; } = featureNames;
 
+    /// <summary>The single field, property, or parameter value this guard applies to.</summary>
+    public object? GuardedValue { get; private set; }
+
+    /// <summary>Whether this guard is restricted to <see cref="GuardedValue"/>.</summary>
+    public bool HasGuardedValue { get; private set; }
+
+    /// <summary>Creates a guard that applies only when the guarded value equals <paramref name="guardedValue"/>.</summary>
+    [EngardeValueConstructor]
+    public EngardeAttribute(object? guardedValue, params string[] featureNames) : this(featureNames)
+    {
+        ConfigureGuardedValue(guardedValue);
+    }
+
+    /// <summary>The DI-resolved replacement type used when a class or interface guard is disabled.</summary>
+    public Type? FallbackType { get; private set; }
+
+    /// <summary>The replacement method used when a method guard is disabled.</summary>
+    public string? FallbackMethod { get; private set; }
+
+    /// <summary>Creates a class/interface guard that dispatches disabled calls to <paramref name="fallbackType"/>.</summary>
+    [EngardeFallbackConstructor(EngardeFallbackKind.Type)]
+    public EngardeAttribute(Type fallbackType, params string[] featureNames) : this(featureNames)
+    {
+        ConfigureFallback(fallbackType, null);
+    }
+
+    /// <summary>Creates a method guard that dispatches to a matching method on <paramref name="fallbackType"/>.</summary>
+    [EngardeFallbackConstructor(EngardeFallbackKind.Method)]
+    public EngardeAttribute(string fallbackMethod, Type fallbackType, params string[] featureNames) : this(featureNames)
+    {
+        ConfigureFallback(fallbackType, fallbackMethod);
+    }
+
+    /// <summary>Configures fallback metadata from a generated derived-guard constructor.</summary>
+    protected void ConfigureFallback(Type fallbackType, string? fallbackMethod)
+    {
+        FallbackType = fallbackType ?? throw new ArgumentNullException(nameof(fallbackType));
+        FallbackMethod = fallbackMethod;
+    }
+
+    /// <summary>Configures value matching from a generated derived-guard constructor.</summary>
+    protected void ConfigureGuardedValue(object? guardedValue)
+    {
+        GuardedValue = guardedValue;
+        HasGuardedValue = true;
+    }
+
     /// <summary>
     /// Whether the feature is enabled. Defaults to the registered feature store (with this attribute's feature scope id).
     /// </summary>
@@ -71,6 +118,27 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
 
     internal ScopeId? GetFeatureScopeId(EngardeContext context) => ResolveFeatureScopeId(context);
 }
+
+/// <summary>Identifies generated fallback constructors for the build-time weaver.</summary>
+[AttributeUsage(AttributeTargets.Constructor, Inherited = false)]
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public sealed class EngardeFallbackConstructorAttribute(EngardeFallbackKind kind) : Attribute
+{
+    public EngardeFallbackKind Kind { get; } = kind;
+}
+
+/// <summary>The target supported by an Engarde fallback constructor.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public enum EngardeFallbackKind
+{
+    Type,
+    Method
+}
+
+/// <summary>Identifies generated value-selective constructors for the build-time weaver.</summary>
+[AttributeUsage(AttributeTargets.Constructor, Inherited = false)]
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public sealed class EngardeValueConstructorAttribute : Attribute;
 
 /// <summary>
 /// Evaluates features with the registered feature store, but for its own feature scope id.

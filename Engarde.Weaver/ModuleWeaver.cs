@@ -14,6 +14,8 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
     private const string RuntimeAssemblyName = "Engarde";
     private const string AttributeFullName = "Engarde.EngardeAttribute";
     private const string ChecksFullName = "Engarde.EngardeChecks";
+    private const string FallbackConstructorFullName = "Engarde.EngardeFallbackConstructorAttribute";
+    private const string ValueConstructorFullName = "Engarde.EngardeValueConstructorAttribute";
     private const string TestingAssemblyName = "Engarde.Testing";
     private const string TestingOverrideFullName = "Engarde.Testing.EngardeTestOverrideAttribute";
     private const string TestingRuntimeFullName = "Engarde.Testing.EngardeTesting";
@@ -29,7 +31,7 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
     private readonly Dictionary<string, bool> _testingOverrideTypes = new();
     private readonly Dictionary<ModuleDefinition, bool> _modulesUsingGuards = new();
     private readonly Dictionary<FieldDefinition, (bool Guarded, PropertyDefinition? Property)> _fields = new();
-    private readonly Dictionary<MethodDefinition, MethodDefinition> _asyncWrappers = new();
+    private readonly Dictionary<MethodDefinition, MethodDefinition> _methodWrappers = new();
 
     private ModuleDefinition _module = null!;
     private RuntimeMethods? _runtime;
@@ -54,6 +56,7 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
 
         ValidateGuardedParameters();
         ValidateGuardedFieldReferences();
+        ValidateFallbacks();
 
         // An up-to-date compile output may already be woven when only the weaver changed
         if (module.Types.Any(type => type.Namespace == MarkerNamespace && type.Name == MarkerName))
@@ -61,7 +64,7 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
 
         var woven = AddInheritedImplementations();
         woven += WeaveGuardedMembers();
-        RedirectAsyncMethodReferences();
+        RedirectMethodReferences();
         woven += WeaveFieldWrites();
         woven += WeaveTestingScopes();
 
@@ -104,6 +107,87 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
             }
         }
     }
+
+    private void ValidateFallbacks()
+    {
+        foreach (var type in _module.GetTypes())
+        {
+            foreach (var attribute in type.CustomAttributes)
+            {
+                if (IsValueConstructor(attribute))
+                    throw new NotSupportedException(
+                        $"A value-selective guard cannot be applied to type '{type.FullName}'; use it on a field, property, or parameter.");
+                if (GetFallbackKind(attribute) is not { } kind) continue;
+                if (kind != FallbackKind.Type || !type.IsClass && !type.IsInterface)
+                    throw new NotSupportedException(
+                        $"Fallback constructor on '{type.FullName}' is for a class/interface replacement; method fallbacks can only be applied to methods.");
+                var fallback = (TypeReference)attribute.ConstructorArguments[0].Value;
+                if (fallback.ContainsGenericParameter || TryResolve(fallback) is not { IsClass: true, IsAbstract: false } definition ||
+                    !IsAssignableTo(definition, type))
+                    throw new NotSupportedException(
+                        $"Fallback type '{fallback.FullName}' must be a concrete class that implements or inherits guarded type '{type.FullName}'.");
+            }
+
+            foreach (var method in type.Methods)
+            foreach (var attribute in method.CustomAttributes)
+            {
+                if (IsValueConstructor(attribute))
+                    throw new NotSupportedException(
+                        $"A value-selective guard cannot be applied to method or constructor '{method.FullName}'; use it on a field, property, or parameter.");
+                if (GetFallbackKind(attribute) is not { } kind) continue;
+                if (kind != FallbackKind.Method || method.IsConstructor)
+                    throw new NotSupportedException(
+                        $"Fallback constructor on '{method.FullName}' is for a method replacement; type fallbacks can only be applied to classes or interfaces.");
+                var name = (string)attribute.ConstructorArguments[0].Value;
+                var fallback = (TypeReference)attribute.ConstructorArguments[1].Value;
+                if (fallback.ContainsGenericParameter || TryResolve(fallback) is not { } definition)
+                    throw new NotSupportedException($"Cannot resolve fallback type '{fallback.FullName}' for '{method.FullName}'.");
+                var candidate = definition.Methods.FirstOrDefault(value => value.Name == name &&
+                    (!method.IsStatic || value.IsStatic) && SameSignatureAndReturn(value, method));
+                if (candidate is null)
+                    throw new NotSupportedException(
+                        $"Fallback method '{fallback.FullName}.{name}' must have a compatible static/instance form and the same generic arity, parameters and return type as '{method.FullName}'.");
+                if (candidate == method)
+                    throw new NotSupportedException($"Fallback method for '{method.FullName}' cannot be the guarded method itself.");
+            }
+
+            foreach (var provider in type.Methods.Cast<ICustomAttributeProvider>()
+                         .Concat(type.Properties).Concat(type.Fields)
+                         .Concat(type.Methods.SelectMany(method => method.Parameters)))
+            foreach (var attribute in provider.CustomAttributes)
+            {
+                if (provider is MethodDefinition || GetFallbackKind(attribute) is null) continue;
+                throw new NotSupportedException("Engarde fallbacks can only be applied to methods, classes, and interfaces.");
+            }
+        }
+    }
+
+    private static bool SameSignatureAndReturn(MethodDefinition left, MethodDefinition right) =>
+        left.GenericParameters.Count == right.GenericParameters.Count &&
+        Signature(left, null) == Signature(right, null) &&
+        SignatureName(left.ReturnType) == SignatureName(right.ReturnType);
+
+    private static bool IsAssignableTo(TypeDefinition fallback, TypeDefinition guarded)
+    {
+        if (fallback.FullName == guarded.FullName) return true;
+        if (guarded.IsInterface)
+            return Interfaces(fallback, null).Any(value => value.Type.FullName == guarded.FullName);
+        return BaseTypes(fallback).Any(value => value.Type.FullName == guarded.FullName);
+    }
+
+    private static FallbackKind? GetFallbackKind(CustomAttribute attribute)
+    {
+        var constructor = TryResolve(attribute.Constructor);
+        var marker = constructor?.CustomAttributes.FirstOrDefault(value =>
+            value.AttributeType.FullName == FallbackConstructorFullName);
+        return marker is null ? null : (FallbackKind)(int)marker.ConstructorArguments[0].Value;
+    }
+
+    private static bool IsValueConstructor(CustomAttribute attribute) =>
+        TryResolve(attribute.Constructor)?.CustomAttributes.Any(value =>
+            value.AttributeType.FullName == ValueConstructorFullName) == true;
+
+    private enum FallbackKind { Type, Method }
 
     /// <summary>
     /// A class re-declaring an interface may implement its members with methods inherited from a base class that
@@ -261,6 +345,8 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
                     ? method.IsStatic ? typeGuarded : constructorTypeGuarded
                     : methodTypeGuarded;
                 var guardsMethod = HasGuard(method) || related.Any(HasGuard) || (typeGuardsApply && IsGuardedByType(method));
+                var hasFallback = !method.IsConstructor && IsGuardedByType(method) &&
+                    MethodGuardAttributes(method, related, bases, interfaces).Any(attribute => GetFallbackKind(attribute) is not null);
                 var guardedParameters = method.Parameters
                     .Where(parameter => IsValueType(parameter.ParameterType) && (HasGuard(parameter) ||
                         related.Any(inherited => HasGuard(inherited.Parameters[parameter.Index]))))
@@ -269,6 +355,17 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
                 if ((guardsMethod || guardedParameters.Count != 0) && GetAsyncReturn(method.ReturnType) is { } asyncReturn)
                 {
                     WrapAsyncMethod(method, asyncReturn);
+                    woven++;
+                    continue;
+                }
+
+                if (hasFallback)
+                {
+                    if (method.Parameters.Any(parameter => parameter.ParameterType is ByReferenceType or PointerType) ||
+                        method.ReturnType is ByReferenceType or PointerType)
+                        throw new NotSupportedException(
+                            $"Cannot use a fallback on '{method.FullName}': by-reference and pointer signatures are unsupported.");
+                    WrapSyncMethod(method);
                     woven++;
                     continue;
                 }
@@ -485,8 +582,125 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         implementation.Attributes = (implementation.Attributes & MethodAttributes.Static)
             | MethodAttributes.Private | MethodAttributes.HideBySig;
         implementation.DeclaringType.Methods.Add(wrapper);
-        _asyncWrappers.Add(implementation, wrapper);
+        _methodWrappers.Add(implementation, wrapper);
         BuildAsyncWrapperBody(wrapper, implementation, asyncReturn);
+    }
+
+    private void WrapSyncMethod(MethodDefinition implementation)
+    {
+        var originalName = implementation.Name;
+        var originalAttributes = implementation.Attributes;
+        var wrapper = new MethodDefinition(originalName, originalAttributes, _module.TypeSystem.Void)
+        {
+            ImplAttributes = implementation.ImplAttributes,
+            CallingConvention = implementation.CallingConvention,
+            ExplicitThis = implementation.ExplicitThis,
+            HasThis = implementation.HasThis
+        };
+
+        var genericMap = new Dictionary<GenericParameter, GenericParameter>();
+        foreach (var parameter in implementation.GenericParameters)
+        {
+            var copy = new GenericParameter(parameter.Name, wrapper) { Attributes = parameter.Attributes };
+            wrapper.GenericParameters.Add(copy);
+            genericMap.Add(parameter, copy);
+        }
+        foreach (var parameter in implementation.GenericParameters)
+        foreach (var constraint in parameter.Constraints)
+            genericMap[parameter].Constraints.Add(new GenericParameterConstraint(
+                ReplaceMethodGenerics(constraint.ConstraintType, genericMap)));
+
+        wrapper.ReturnType = ReplaceMethodGenerics(implementation.ReturnType, genericMap);
+        foreach (var parameter in implementation.Parameters)
+        {
+            var copy = new ParameterDefinition(parameter.Name, parameter.Attributes,
+                ReplaceMethodGenerics(parameter.ParameterType, genericMap));
+            if (parameter.HasConstant) copy.Constant = parameter.Constant;
+            MoveCustomAttributes(parameter, copy);
+            wrapper.Parameters.Add(copy);
+        }
+        MoveCustomAttributes(implementation.MethodReturnType, wrapper.MethodReturnType);
+        MoveCustomAttributes(implementation, wrapper);
+        foreach (var @override in implementation.Overrides.ToList())
+        {
+            implementation.Overrides.Remove(@override);
+            wrapper.Overrides.Add(@override);
+        }
+
+        implementation.Name = $"<{originalName}>g__EngardeImplementation";
+        implementation.Attributes = (implementation.Attributes & MethodAttributes.Static)
+            | MethodAttributes.Private | MethodAttributes.HideBySig;
+        implementation.DeclaringType.Methods.Add(wrapper);
+        _methodWrappers.Add(implementation, wrapper);
+        BuildSyncWrapperBody(wrapper, implementation);
+    }
+
+    private void BuildSyncWrapperBody(MethodDefinition wrapper, MethodDefinition implementation)
+    {
+        var body = new MethodBody(wrapper) { InitLocals = false, MaxStackSize = 8 };
+        wrapper.Body = body;
+        var il = body.GetILProcessor();
+        AppendInvocationArguments(il, wrapper, implementation);
+        var runtimeMethod = wrapper.ReturnType.MetadataType == MetadataType.Void
+            ? Runtime.InvokeMethod
+            : MakeGeneric(Runtime.InvokeMethodOf, wrapper.ReturnType);
+        il.Append(il.Create(OpCodes.Call, runtimeMethod));
+        il.Append(il.Create(OpCodes.Ret));
+    }
+
+    private void AppendInvocationArguments(ILProcessor il, MethodDefinition wrapper, MethodDefinition implementation)
+    {
+        var (wrapperReference, typeReference) = SelfReference(wrapper);
+        if (wrapper.HasThis)
+        {
+            il.Append(il.Create(OpCodes.Ldarg_0));
+            if (wrapper.DeclaringType.IsValueType || wrapper.DeclaringType.HasGenericParameters)
+                il.Append(il.Create(OpCodes.Box, typeReference));
+        }
+        else
+            il.Append(il.Create(OpCodes.Ldnull));
+
+        il.Append(il.Create(OpCodes.Ldc_I4, wrapper.Parameters.Count));
+        il.Append(il.Create(OpCodes.Newarr, _module.TypeSystem.Object));
+        for (var index = 0; index < wrapper.Parameters.Count; index++)
+        {
+            var parameter = wrapper.Parameters[index];
+            il.Append(il.Create(OpCodes.Dup));
+            il.Append(il.Create(OpCodes.Ldc_I4, index));
+            il.Append(il.Create(OpCodes.Ldarg, parameter));
+            if (parameter.ParameterType.IsValueType || parameter.ParameterType is GenericParameter)
+                il.Append(il.Create(OpCodes.Box, _module.ImportReference(parameter.ParameterType)));
+            il.Append(il.Create(OpCodes.Stelem_Ref));
+        }
+
+        MethodReference implementationReference = SelfReference(implementation).Method;
+        if (implementation.HasGenericParameters)
+        {
+            var instance = new GenericInstanceMethod(implementationReference);
+            foreach (var parameter in wrapper.GenericParameters)
+                instance.GenericArguments.Add(parameter);
+            implementationReference = instance;
+        }
+        il.Append(il.Create(OpCodes.Ldtoken, implementationReference));
+        il.Append(il.Create(OpCodes.Ldtoken, wrapperReference));
+        il.Append(il.Create(OpCodes.Ldtoken, typeReference));
+
+        if (wrapper.HasGenericParameters)
+        {
+            il.Append(il.Create(OpCodes.Ldc_I4, wrapper.GenericParameters.Count));
+            il.Append(il.Create(OpCodes.Newarr, _module.ImportReference(typeof(Type))));
+            for (var index = 0; index < wrapper.GenericParameters.Count; index++)
+            {
+                il.Append(il.Create(OpCodes.Dup));
+                il.Append(il.Create(OpCodes.Ldc_I4, index));
+                il.Append(il.Create(OpCodes.Ldtoken, wrapper.GenericParameters[index]));
+                il.Append(il.Create(OpCodes.Call, _module.ImportReference(typeof(Type).GetMethod(
+                    nameof(Type.GetTypeFromHandle), [typeof(RuntimeTypeHandle)])!)));
+                il.Append(il.Create(OpCodes.Stelem_Ref));
+            }
+        }
+        else
+            il.Append(il.Create(OpCodes.Ldnull));
     }
 
     private void BuildAsyncWrapperBody(MethodDefinition wrapper, MethodDefinition implementation, AsyncReturn asyncReturn)
@@ -559,9 +773,9 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         il.Append(il.Create(OpCodes.Ret));
     }
 
-    private void RedirectAsyncMethodReferences()
+    private void RedirectMethodReferences()
     {
-        if (_asyncWrappers.Count == 0)
+        if (_methodWrappers.Count == 0)
             return;
 
         foreach (var method in _module.GetTypes().SelectMany(type => type.Methods).Where(method => method.HasBody))
@@ -571,7 +785,7 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
                 if (instruction.Operand is not MethodReference reference)
                     continue;
                 var definition = TryResolve(reference);
-                if (definition is null || !_asyncWrappers.TryGetValue(definition, out var wrapper))
+                if (definition is null || !_methodWrappers.TryGetValue(definition, out var wrapper))
                     continue;
                 // The generated wrapper intentionally holds the implementation method token for deferred invocation.
                 if (method == wrapper && instruction.OpCode == OpCodes.Ldtoken)
@@ -769,6 +983,23 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
             foreach (var candidate in type.Methods.Where(candidate => candidate.IsVirtual && candidate.Name == method.Name &&
                          Signature(candidate, context) == signature))
                 yield return candidate;
+    }
+
+    private static IEnumerable<CustomAttribute> MethodGuardAttributes(MethodDefinition method,
+        List<MethodDefinition> related, List<(TypeDefinition Type, GenericInstanceType? Context)> bases,
+        List<(TypeDefinition Type, GenericInstanceType? Context)> interfaces)
+    {
+        foreach (var attribute in method.CustomAttributes)
+            yield return attribute;
+        foreach (var inherited in related)
+        foreach (var attribute in inherited.CustomAttributes)
+            yield return attribute;
+
+        foreach (var source in new[] { method.DeclaringType }
+                     .Concat(bases.Select(value => value.Type))
+                     .Concat(interfaces.Select(value => value.Type)))
+        foreach (var attribute in source.CustomAttributes)
+            yield return attribute;
     }
 
     private static IEnumerable<(TypeDefinition Type, GenericInstanceType? Context)> BaseTypes(TypeDefinition type)
@@ -1028,7 +1259,8 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         return new RuntimeMethods(
             Import("CheckMethod"), Import("CheckParameter"), Import("CheckProperty"), Import("CheckField"),
             ImportOverload("CheckTaskMethod", false), ImportOverload("CheckTaskMethod", true),
-            ImportOverload("CheckValueTaskMethod", false), ImportOverload("CheckValueTaskMethod", true));
+            ImportOverload("CheckValueTaskMethod", false), ImportOverload("CheckValueTaskMethod", true),
+            ImportOverload("InvokeMethod", false), ImportOverload("InvokeMethod", true));
     }
 
     private sealed record RuntimeMethods(
@@ -1039,7 +1271,9 @@ internal sealed class ModuleWeaver(string assemblyPath, IReadOnlyCollection<stri
         MethodReference CheckTask,
         MethodReference CheckTaskOf,
         MethodReference CheckValueTask,
-        MethodReference CheckValueTaskOf);
+        MethodReference CheckValueTaskOf,
+        MethodReference InvokeMethod,
+        MethodReference InvokeMethodOf);
 
     private sealed record AsyncReturn(bool IsValueTask, TypeReference? ResultType);
 }

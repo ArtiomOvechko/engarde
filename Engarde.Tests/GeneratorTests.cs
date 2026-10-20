@@ -355,7 +355,11 @@ public sealed class GeneratorTests
         var generatedGuard = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
                 .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax>())
             .Single(type => type.Identifier.ValueText == "FeaturePermissionGuard");
-        Assert.Single(generatedGuard.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax>());
+        var constructors = generatedGuard.Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax>().ToArray();
+        Assert.Equal(4, constructors.Length);
+        Assert.All(constructors, constructor =>
+            Assert.DoesNotContain("InternalSetting", constructor.ParameterList.ToString()));
     }
 
     [Fact]

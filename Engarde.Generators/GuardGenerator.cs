@@ -212,6 +212,8 @@ public sealed class GuardGenerator : IIncrementalGenerator
             generatedConstructors.Append("public ").Append(Escape(className)).Append('(')
                 .Append(string.Join(", ", declarations)).Append(") : base(")
                 .Append(string.Join(", ", baseArguments)).Append(") { }\n");
+            AppendFallbackConstructors(generatedConstructors, "public", className, declarations, arguments);
+            AppendGuardedValueConstructor(generatedConstructors, "public", className, declarations, [], arguments);
             var instance = "new " + Escape(className) + "(" + string.Join(", ", arguments) + ")";
             AppendQuery(contract, methods, declarations, instance);
             scopeQueries.Add(new ScopeQuery(settings.Select(parameter => TypeName(parameter.Type)).ToList(),
@@ -290,6 +292,7 @@ public sealed class GuardGenerator : IIncrementalGenerator
 
         var contract = new StringBuilder();
         var methods = new StringBuilder();
+        var fallbackConstructors = new StringBuilder();
         var signatures = new HashSet<string>();
         var scopeQueries = new List<ScopeQuery>();
         foreach (var ctor in symbol.InstanceConstructors.Where(constructor => CanExposeConstructor(constructor, symbol)))
@@ -328,6 +331,26 @@ public sealed class GuardGenerator : IIncrementalGenerator
             AppendQuery(contract, methods, declarations, queryArguments);
             scopeQueries.Add(new ScopeQuery(types, parameters.Select(p => p.Name).Concat(flagName is null ? Array.Empty<string>() : new[] { flagName }).ToList(),
                 declarations, queryArguments));
+
+            var constructorDeclarations = ctor.Parameters.Select(ParameterDeclaration).ToList();
+            var constructorArguments = ctor.Parameters.Select(parameter => Escape(parameter.Name)).ToList();
+            if (ctor.IsImplicitlyDeclared)
+                fallbackConstructors.Append(AccessibilityText(ctor.DeclaredAccessibility)).Append(' ')
+                    .Append(Escape(symbol.Name)).Append("() { }\n");
+            AppendFallbackConstructors(fallbackConstructors, AccessibilityText(ctor.DeclaredAccessibility),
+                symbol.Name, constructorDeclarations, constructorArguments);
+
+            var valueDeclarations = parameters.Select(parameter =>
+                TypeName(parameter.Type) + " " + Escape(parameter.Name)).ToList();
+            var valueArguments = parameters.Select(parameter => Escape(parameter.Name)).ToList();
+            var featureDeclarations = new List<string>();
+            if (replaceFeatures)
+            {
+                featureDeclarations.Add(ParameterDeclaration(features!));
+                valueArguments.Add(Escape(features!.Name));
+            }
+            AppendGuardedValueConstructor(fallbackConstructors, AccessibilityText(ctor.DeclaredAccessibility),
+                symbol.Name, valueDeclarations, featureDeclarations, valueArguments);
         }
         AppendScopeQueries(contract, methods, signatures, scopeQueries, symbol);
 
@@ -346,6 +369,7 @@ public sealed class GuardGenerator : IIncrementalGenerator
             .Append(TypeParameters(symbol)).Append(Constraints(symbol)).Append(" {\n").Append(contract).Append("}\n");
 
         AppendPartial(source, symbol);
+        source.Append(fallbackConstructors);
         var container = symbol.ContainingType is not null ? TypeName(symbol.ContainingType) + "."
             : symbol.ContainingNamespace.IsGlobalNamespace ? "global::" : "global::" + symbol.ContainingNamespace.ToDisplayString() + ".";
         var interfaceType = container + Escape(interfaceName) + TypeParameters(symbol);
@@ -382,6 +406,39 @@ public sealed class GuardGenerator : IIncrementalGenerator
         registrations.Add((container + Escape(interfaceName) + arguments,
             container + Escape(className) + arguments + ".__EngardeQueries"));
     }
+
+    private static void AppendFallbackConstructors(StringBuilder source, string accessibility, string className,
+        List<string> declarations, List<string> arguments)
+    {
+        var suffix = declarations.Count == 0 ? "" : ", " + string.Join(", ", declarations);
+        var forwarded = string.Join(", ", arguments);
+        source.Append("[global::Engarde.EngardeFallbackConstructor(global::Engarde.EngardeFallbackKind.Type)]\n")
+            .Append(accessibility).Append(' ').Append(Escape(className))
+            .Append("(global::System.Type fallbackType").Append(suffix).Append(") : this(")
+            .Append(forwarded).Append(") { ConfigureFallback(fallbackType, null); }\n")
+            .Append("[global::Engarde.EngardeFallbackConstructor(global::Engarde.EngardeFallbackKind.Method)]\n")
+            .Append(accessibility).Append(' ').Append(Escape(className))
+            .Append("(string fallbackMethod, global::System.Type fallbackType").Append(suffix).Append(") : this(")
+            .Append(forwarded).Append(") { ConfigureFallback(fallbackType, fallbackMethod); }\n");
+    }
+
+    private static void AppendGuardedValueConstructor(StringBuilder source, string accessibility, string className,
+        List<string> declarations, List<string> featureDeclarations, List<string> arguments)
+    {
+        var valueName = "guardedValue";
+        while (declarations.Concat(featureDeclarations)
+               .Any(declaration => declaration.EndsWith(" " + valueName, StringComparison.Ordinal)))
+            valueName = "_" + valueName;
+        var parameters = declarations.Concat(new[] { "object? " + valueName }).Concat(featureDeclarations);
+        source.Append("[global::Engarde.EngardeValueConstructor]\n")
+            .Append(accessibility).Append(' ').Append(Escape(className)).Append('(')
+            .Append(string.Join(", ", parameters)).Append(") : this(")
+            .Append(string.Join(", ", arguments)).Append(") { ConfigureGuardedValue(")
+            .Append(valueName).Append("); }\n");
+    }
+
+    private static string ParameterDeclaration(IParameterSymbol parameter) =>
+        (parameter.IsParams ? "params " : "") + TypeName(parameter.Type) + " " + Escape(parameter.Name);
 
     private static void GenerateRegistrations(SourceProductionContext output,
         List<(string Service, string Implementation)> registrations)

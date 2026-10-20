@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Engarde.SampleWebApi.Guards;
 using Microsoft.AspNetCore.Mvc;
 
@@ -16,17 +17,30 @@ public sealed class WeatherForecastController(
     ];
 
     [HttpGet]
-    [Engarde("weatherforecast_new")]
+    [Engarde(
+        nameof(GetOld),
+        typeof(WeatherForecastController),
+        "weatherforecast_new")]
     public WeatherForecast[] Get()
     {
-        return Enumerable.Range(1, 5).Select(index =>
+        return Enumerable.Range(1, 15).Select(index =>
             new WeatherForecast(
                 DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
                 Random.Shared.Next(-20, 55),
                 _summaries[Random.Shared.Next(_summaries.Length)]))
             .ToArray();
     }
-    
+
+    public WeatherForecast[] GetOld()
+    {
+        return Enumerable.Range(1, 5).Select(index =>
+                new WeatherForecast(
+                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
+                    Random.Shared.Next(-20, 55),
+                    _summaries[Random.Shared.Next(_summaries.Length)]))
+            .ToArray();
+    }
+
     [HttpPost]
     public async Task<ActionResult<string[]>> Post([FromBody] WeatherDto weatherDto)
     {
