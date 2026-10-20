@@ -41,7 +41,7 @@ public static class EngardeServiceCollectionExtensions
             var index = services.IndexOf(descriptor);
             if (index < 0) continue;
             services[index] = new ServiceDescriptor(descriptor.ServiceType, provider =>
-                EngardeChecks.ResolveGuardedService(provider, guardedType,
+                EngardeChecks.ResolveGuardedService(provider, descriptor.ServiceType, guardedType,
                     () => CreateService(descriptor, provider)), descriptor.Lifetime);
         }
     }

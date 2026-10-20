@@ -22,6 +22,72 @@ public sealed class MyService
 }
 ```
 
+Method fallbacks
+```csharp
+public sealed class Checkout
+{
+    [Engarde(nameof(PlaceOrderWithoutDiscount), typeof(Checkout), "discount-checkout")]
+    public Task<Order> PlaceOrderAsync(Cart cart) => PlaceDiscountedOrderAsync(cart);
+
+    private Task<Order> PlaceOrderWithoutDiscount(Cart cart) => PlaceRegularOrderAsync(cart);
+}
+```
+
+DI-backed type fallbacks
+```csharp
+[Engarde(typeof(LegacyWeatherService), "new-weather-service")]
+public interface IWeatherService
+{
+    Task<Forecast> GetForecastAsync();
+}
+
+public sealed class NewWeatherService : IWeatherService
+{
+    public Task<Forecast> GetForecastAsync() => GetNewForecastAsync();
+}
+
+public sealed class LegacyWeatherService : IWeatherService
+{
+    public Task<Forecast> GetForecastAsync() => GetLegacyForecastAsync();
+}
+
+// Register primary implementation in DI
+// AddEngarde will automatically register fallback with the same scoped lifetime.
+builder.Services.AddScoped<IWeatherService, NewWeatherService>();
+```
+
+Static methods can be guarded like instance methods.
+
+```csharp
+public static class ReportExporter
+{
+    [Engarde("pdf-export")]
+    public static Task<byte[]> ExportPdfAsync(Report report) => RenderPdfAsync(report);
+}
+```
+
+Value-based guards
+
+```csharp
+public enum PizzaType
+{
+    Mushroom,
+    Pineapple
+}
+
+public sealed class PizzaOrder
+{
+    [Engarde(PizzaType.Pineapple, "new-flavor")]
+    public PizzaType? Type { get; set; }
+
+    public void ChangeType(
+        [Engarde(PizzaType.Pineapple, "new-flavor")] PizzaType type)
+    {
+        Type = type;
+    }
+}
+```
+
 ## Setup
 
 Register a feature store and, optionally, how to resolve the scope ID (here, the current user) that features are checked for.
@@ -143,11 +209,29 @@ public partial class AccessGuard : EngardeAttribute;
 
 ### Failures in inline checks
 
-A guard's generated query calls its `OnFeatureMissing` for each disabled feature. Add `[SkipInlineFailures]` to return boolean result without calling OnFeatureMissing(); attribute guards still call it
+A guard's generated query calls `OnFeatureMissing` for each disabled feature; add `[SkipInlineFailures]` to return the Boolean result without calling it, while woven attribute checks still call it.
 
 ```csharp
 [SkipInlineFailures]
 public sealed partial class MenuGuard() : EngardeAttribute("menu");
+```
+
+### Failures before fallbacks
+
+A valid method or type fallback calls `OnFeatureMissing` before dispatch by default, so throwing prevents the fallback; add `[SkipFallbackFailures]` to the custom guard class to dispatch without calling it.
+
+```csharp
+[SkipFallbackFailures]
+public sealed partial class FallbackMenuGuard(params string[] featureNames)
+    : EngardeAttribute(featureNames);
+
+public sealed class Menu
+{
+    [FallbackMenuGuard(nameof(OpenLegacy), typeof(Menu), "new-menu")]
+    public void Open() => OpenNew();
+
+    private void OpenLegacy() => OpenOld();
+}
 ```
 
 ## Custom scope

@@ -20,6 +20,7 @@ public static class EngardeChecks
     private static readonly ConcurrentDictionary<(nint, nint, int), Guards> ParameterGuardsCache = new();
     private static readonly ConcurrentDictionary<(nint, nint), Guards> PropertyGuardsCache = new();
     private static readonly ConcurrentDictionary<(nint, nint), Guards> FieldGuardsCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> SkipFallbackFailuresCache = new();
     private static readonly AsyncLocal<SuppressedGuard?> Suppressed = new();
     private static Func<Type, string, bool?>? _guardOverride;
 
@@ -29,9 +30,10 @@ public static class EngardeChecks
         Volatile.Write(ref _guardOverride, guardOverride);
 
     internal static object ResolveGuardedService(
-        IServiceProvider services, EngardeAttribute guard, Func<object> createPrimary)
+        IServiceProvider services, Type guardedType, EngardeAttribute guard, Func<object> createPrimary)
     {
-        var enabled = Wait((services, guard), static state => EvaluateTypeGuardAsync(state.services, state.guard));
+        var enabled = Wait((services, guardedType, guard), static state =>
+            EvaluateTypeGuardAsync(state.services, state.guardedType, state.guard));
         using var suppression = Suppress(new FallbackInvocation(null, null, guard.GetType(), guard.FeatureNames.ToArray()));
         if (enabled)
             return createPrimary();
@@ -40,13 +42,18 @@ public static class EngardeChecks
                 $"Fallback type '{guard.FallbackType}' is not registered in the active DI scope.");
     }
 
-    private static async ValueTask<bool> EvaluateTypeGuardAsync(IServiceProvider services, EngardeAttribute guard)
+    private static async ValueTask<bool> EvaluateTypeGuardAsync(
+        IServiceProvider services, Type guardedType, EngardeAttribute guard)
     {
         await using var evaluation = EngardeEvaluation.Begin(services, false);
         foreach (var featureName in guard.FeatureNames)
             if (IsGuardEnabled(guard, featureName) &&
-                !await guard.EvaluateAsync(evaluation, featureName, guard.FallbackType!, null, null).ConfigureAwait(false))
+                !await guard.EvaluateAsync(evaluation, featureName, guardedType, null, null).ConfigureAwait(false))
+            {
+                if (!SkipsFallbackFailures(guard.GetType()))
+                    guard.OnFeatureMissing(featureName, evaluation.CreateContext(guardedType, null));
                 return false;
+            }
         return true;
     }
 
@@ -292,7 +299,14 @@ public static class EngardeChecks
                 var resolved = ResolveFallback(evaluation, (MethodInfo)guards.Member, guard, featureName, target, genericArguments);
                 fallback ??= resolved;
                 if (resolved is not null)
+                {
+                    if (!SkipsFallbackFailures(guard.GetType()))
+                    {
+                        context ??= evaluation.CreateContext(guards.Member, null);
+                        guard.OnFeatureMissing(featureName, context);
+                    }
                     continue;
+                }
                 context ??= evaluation.CreateContext(guards.Member, null);
                 guard.OnFeatureMissing(featureName, context);
             }
@@ -400,6 +414,9 @@ public static class EngardeChecks
         Suppressed.Value = new(fallback.GuardType, fallback.FeatureNames, previous);
         return new Scope(() => Suppressed.Value = previous);
     }
+
+    private static bool SkipsFallbackFailures(Type guardType) => SkipFallbackFailuresCache.GetOrAdd(guardType,
+        static type => type.IsDefined(typeof(SkipFallbackFailuresAttribute), inherit: true));
 
     private static Guards GetMethodGuards(RuntimeMethodHandle method, RuntimeTypeHandle type) =>
         MethodGuardsCache.GetOrAdd((method.Value, type.Value), static (_, handles) =>

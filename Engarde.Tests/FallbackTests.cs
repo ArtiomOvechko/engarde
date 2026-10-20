@@ -7,12 +7,16 @@ namespace Engarde.Tests;
 public sealed class FallbackTests
 {
     private static ServiceProvider Provider(bool enabled, params ServiceDescriptor[] services)
+        => ProviderWithFailure(enabled, (_, _) => { }, services);
+
+    private static ServiceProvider ProviderWithFailure(
+        bool enabled, Action<string, EngardeContext> onFeatureMissing, params ServiceDescriptor[] services)
     {
         var collection = new ServiceCollection();
         foreach (var service in services) ((ICollection<ServiceDescriptor>)collection).Add(service);
         collection.AddEngarde(builder => builder
             .UseFeatureStore<FallbackStore>((store, _) => ValueTask.FromResult(store.Enabled))
-            .OnFeatureMissing((_, _) => throw new FallbackDisabledException()));
+            .OnFeatureMissing(onFeatureMissing));
         collection.AddSingleton(new FallbackStore(enabled));
         return collection.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
@@ -38,6 +42,27 @@ public sealed class FallbackTests
 
         Assert.Equal("primary:4", subject.Read(4));
         Assert.Equal(1, subject.PrimaryCalls);
+    }
+
+    [Fact]
+    public void Method_fallback_calls_failure_handler_before_dispatch_by_default()
+    {
+        using var provider = ProviderWithFailure(false, (_, _) => throw new FallbackDisabledException());
+        using var active = global::Engarde.Engarde.BeginScope(provider);
+        var subject = new MethodFallbackSubject();
+
+        Assert.Throws<FallbackDisabledException>(() => subject.Read(4));
+        Assert.Equal(0, subject.PrimaryCalls);
+        Assert.Equal(0, subject.FallbackCalls);
+    }
+
+    [Fact]
+    public void SkipFallbackFailures_dispatches_method_fallback_without_failure_handler()
+    {
+        using var provider = ProviderWithFailure(false, (_, _) => throw new FallbackDisabledException());
+        using var active = global::Engarde.Engarde.BeginScope(provider);
+
+        Assert.Equal("fallback:9", new SkipFallbackFailureSubject().Read(9));
     }
 
     [Fact]
@@ -86,6 +111,32 @@ public sealed class FallbackTests
     }
 
     [Fact]
+    public void Type_fallback_calls_failure_handler_before_resolution_by_default()
+    {
+        using var provider = ProviderWithFailure(false, (_, _) => throw new FallbackDisabledException(),
+            ServiceDescriptor.Scoped(typeof(IFallbackService), typeof(InterfacePrimaryService)),
+            ServiceDescriptor.Scoped(typeof(InterfaceFallbackService), typeof(InterfaceFallbackService)));
+        using var scope = provider.CreateScope();
+        using var active = global::Engarde.Engarde.BeginScope(scope.ServiceProvider, false);
+
+        Assert.Throws<FallbackDisabledException>(() => scope.ServiceProvider.GetRequiredService<IFallbackService>());
+    }
+
+    [Fact]
+    public void SkipFallbackFailures_resolves_type_fallback_without_failure_handler()
+    {
+        using var provider = ProviderWithFailure(false, (_, _) => throw new FallbackDisabledException(),
+            ServiceDescriptor.Scoped(typeof(ISkipFallbackService), typeof(SkipFallbackPrimaryService)),
+            ServiceDescriptor.Scoped(typeof(SkipFallbackService), typeof(SkipFallbackService)));
+        using var scope = provider.CreateScope();
+        using var active = global::Engarde.Engarde.BeginScope(scope.ServiceProvider, false);
+
+        var service = scope.ServiceProvider.GetRequiredService<ISkipFallbackService>();
+        Assert.IsType<SkipFallbackService>(service);
+        Assert.Equal("fallback:10", service.Read(10));
+    }
+
+    [Fact]
     public void Generated_custom_guard_fallback_constructor_works_without_DI_for_same_instance_method()
     {
         var subject = new GeneratedGuardFallbackSubject();
@@ -100,6 +151,7 @@ public sealed class FallbackDisabledException : Exception;
 public sealed class MethodFallbackSubject
 {
     public int PrimaryCalls { get; private set; }
+    public int FallbackCalls { get; private set; }
 
     [Engarde(nameof(ReadFallback), typeof(MethodFallbackSubject), "fallback")]
     public string Read(int value)
@@ -108,7 +160,11 @@ public sealed class MethodFallbackSubject
         return $"primary:{value}";
     }
 
-    private string ReadFallback(int value) => $"fallback:{value}";
+    private string ReadFallback(int value)
+    {
+        FallbackCalls++;
+        return $"fallback:{value}";
+    }
 
     [Engarde(nameof(MethodFallbackStatics.Read), typeof(MethodFallbackStatics), "fallback")]
     public string ReadWithStaticFallback(int value)
@@ -173,6 +229,33 @@ public sealed class InterfacePrimaryService : IFallbackService
 }
 
 public sealed class InterfaceFallbackService : IFallbackService
+{
+    public string Read(int value) => $"fallback:{value}";
+}
+
+[SkipFallbackFailures]
+public sealed partial class SkipFallbackGuardAttribute(params string[] featureNames) : EngardeAttribute(featureNames);
+
+public sealed class SkipFallbackFailureSubject
+{
+    [SkipFallbackGuard(nameof(ReadFallback), typeof(SkipFallbackFailureSubject), "fallback")]
+    public string Read(int value) => $"primary:{value}";
+
+    private string ReadFallback(int value) => $"fallback:{value}";
+}
+
+[SkipFallbackGuard(typeof(SkipFallbackService), "fallback")]
+public interface ISkipFallbackService
+{
+    string Read(int value);
+}
+
+public sealed class SkipFallbackPrimaryService : ISkipFallbackService
+{
+    public string Read(int value) => $"primary:{value}";
+}
+
+public sealed class SkipFallbackService : ISkipFallbackService
 {
     public string Read(int value) => $"fallback:{value}";
 }
