@@ -11,12 +11,24 @@ public sealed class FallbackTests
 
     private static ServiceProvider ProviderWithFailure(
         bool enabled, Action<string, EngardeContext> onFeatureMissing, params ServiceDescriptor[] services)
+        => ProviderWithConfiguration(enabled, onFeatureMissing, false, services);
+
+    private static ServiceProvider ProviderSkippingFallbackFailures(
+        bool enabled, Action<string, EngardeContext> onFeatureMissing, params ServiceDescriptor[] services)
+        => ProviderWithConfiguration(enabled, onFeatureMissing, true, services);
+
+    private static ServiceProvider ProviderWithConfiguration(
+        bool enabled, Action<string, EngardeContext> onFeatureMissing, bool skipFallbackFailures,
+        params ServiceDescriptor[] services)
     {
         var collection = new ServiceCollection();
         foreach (var service in services) ((ICollection<ServiceDescriptor>)collection).Add(service);
-        collection.AddEngarde(builder => builder
-            .UseFeatureStore<FallbackStore>((store, _) => ValueTask.FromResult(store.Enabled))
-            .OnFeatureMissing(onFeatureMissing));
+        collection.AddEngarde(builder =>
+        {
+            builder.UseFeatureStore<FallbackStore>((store, _) => ValueTask.FromResult(store.Enabled))
+                .OnFeatureMissing(onFeatureMissing);
+            builder.SkipFallbackFailures = skipFallbackFailures;
+        });
         collection.AddSingleton(new FallbackStore(enabled));
         return collection.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
@@ -63,6 +75,16 @@ public sealed class FallbackTests
         using var active = global::Engarde.Engarde.BeginScope(provider);
 
         Assert.Equal("fallback:9", new SkipFallbackFailureSubject().Read(9));
+    }
+
+    [Fact]
+    public void Global_skip_fallback_failures_dispatches_method_fallback_without_failure_handler()
+    {
+        using var provider = ProviderSkippingFallbackFailures(
+            false, (_, _) => throw new FallbackDisabledException());
+        using var active = global::Engarde.Engarde.BeginScope(provider);
+
+        Assert.Equal("fallback:11", new MethodFallbackSubject().Read(11));
     }
 
     [Fact]
@@ -134,6 +156,18 @@ public sealed class FallbackTests
         var service = scope.ServiceProvider.GetRequiredService<ISkipFallbackService>();
         Assert.IsType<SkipFallbackService>(service);
         Assert.Equal("fallback:10", service.Read(10));
+    }
+
+    [Fact]
+    public void Global_skip_fallback_failures_resolves_type_fallback_without_failure_handler()
+    {
+        using var provider = ProviderSkippingFallbackFailures(false, (_, _) => throw new FallbackDisabledException(),
+            ServiceDescriptor.Scoped(typeof(IFallbackService), typeof(InterfacePrimaryService)),
+            ServiceDescriptor.Scoped(typeof(InterfaceFallbackService), typeof(InterfaceFallbackService)));
+        using var scope = provider.CreateScope();
+        using var active = global::Engarde.Engarde.BeginScope(scope.ServiceProvider, false);
+
+        Assert.IsType<InterfaceFallbackService>(scope.ServiceProvider.GetRequiredService<IFallbackService>());
     }
 
     [Fact]

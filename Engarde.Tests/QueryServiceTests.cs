@@ -177,9 +177,13 @@ public sealed class QueryServiceTests
 
     private static ServiceProvider Services(ServiceLifetime lifetime = ServiceLifetime.Scoped, ConcurrentQueue<QueryStore>? observations = null) =>
         new ServiceCollection().AddScoped(_ => new QueryStore(observations))
-            .AddEngarde(builder => builder.UseFeatureStore<QueryStore>((store, flag) => store.Check(flag))
-                .OnFeatureMissing((_, _) => throw new Exception("Queries do not invoke handlers"))
-                .UseQueryLifetime(lifetime))
+            .AddEngarde(builder =>
+            {
+                builder.UseFeatureStore<QueryStore>((store, flag) => store.Check(flag))
+                    .OnFeatureMissing((_, _) => throw new Exception("Inline failures are globally skipped"))
+                    .UseQueryLifetime(lifetime);
+                builder.SkipInlineFailures = true;
+            })
             .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
 }
 

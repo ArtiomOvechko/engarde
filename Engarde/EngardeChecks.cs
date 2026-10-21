@@ -50,7 +50,7 @@ public static class EngardeChecks
             if (IsGuardEnabled(guard, featureName) &&
                 !await guard.EvaluateAsync(evaluation, featureName, guardedType, null, null).ConfigureAwait(false))
             {
-                if (!SkipsFallbackFailures(guard.GetType()))
+                if (!evaluation.SkipFallbackFailures && !SkipsFallbackFailures(guard.GetType()))
                     guard.OnFeatureMissing(featureName, evaluation.CreateContext(guardedType, null));
                 return false;
             }
@@ -300,7 +300,7 @@ public static class EngardeChecks
                 fallback ??= resolved;
                 if (resolved is not null)
                 {
-                    if (!SkipsFallbackFailures(guard.GetType()))
+                    if (!evaluation.SkipFallbackFailures && !SkipsFallbackFailures(guard.GetType()))
                     {
                         context ??= evaluation.CreateContext(guards.Member, null);
                         guard.OnFeatureMissing(featureName, context);

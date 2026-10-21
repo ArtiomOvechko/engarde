@@ -41,6 +41,8 @@ public sealed class GuardGenerator : IIncrementalGenerator
                     {
                         global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName);
                         global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName, global::System.Threading.CancellationToken cancellationToken);
+                        global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(string featureFlagName, TFeatureScopeId scopeId);
+                        global::System.Threading.Tasks.ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(string featureFlagName, TFeatureScopeId scopeId, global::System.Threading.CancellationToken cancellationToken);
                     }
                     """, Encoding.UTF8));
         });
@@ -76,6 +78,8 @@ public sealed class GuardGenerator : IIncrementalGenerator
                 if (!IsPartial(symbol)) continue;
                 if (GetGeneratedFeatures(symbol) is { } features)
                 {
+                    if (symbol.InstanceConstructors.Any(constructor => ConstructorForwardsFeatures(constructor, input.Right)))
+                        Generate(output, symbol, input.Right, registrations);
                     GenerateFeatureBoundGuards(output, symbol, features, input.Right, registrations);
                     continue;
                 }

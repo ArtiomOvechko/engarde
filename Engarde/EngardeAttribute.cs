@@ -96,9 +96,10 @@ public class EngardeAttribute(params string[] featureNames) : Attribute
     /// <summary>
     /// Called for each disabled feature. Throwing blocks a method or parameter guard; returning lets that call proceed.
     /// A disabled property or field write is skipped after this method returns. Defaults to the registered handler.
-    /// Inline guard queries call it too, unless the guard is marked with <see cref="SkipInlineFailuresAttribute"/>.
+    /// Inline guard queries call it too, unless the guard is marked with <see cref="SkipInlineFailuresAttribute"/>
+    /// or <see cref="EngardeBuilder.SkipInlineFailures"/> is enabled.
     /// Valid fallbacks call it before dispatch unless the guard is marked with
-    /// <see cref="SkipFallbackFailuresAttribute"/>.
+    /// <see cref="SkipFallbackFailuresAttribute"/> or <see cref="EngardeBuilder.SkipFallbackFailures"/> is enabled.
     /// </summary>
     protected internal virtual void OnFeatureMissing(string featureName, EngardeContext context)
     {

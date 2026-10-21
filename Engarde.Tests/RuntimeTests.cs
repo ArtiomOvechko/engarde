@@ -19,9 +19,21 @@ public sealed class RuntimeTests
         var defaultQueries = typeof(IEngarde).GetMethods(
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance
                 | System.Reflection.BindingFlags.DeclaredOnly);
+        Assert.Equal(4, defaultQueries.Length);
+        var unscopedQueries = defaultQueries.Where(query => !query.IsGenericMethod).ToArray();
         Assert.Equal(new[] { new[] { typeof(string) }, new[] { typeof(string), typeof(CancellationToken) } },
-            defaultQueries.Select(query => query.GetParameters().Select(parameter => parameter.ParameterType).ToArray())
+            unscopedQueries.Select(query => query.GetParameters().Select(parameter => parameter.ParameterType).ToArray())
                 .OrderBy(parameters => parameters.Length));
+        var scopedQueries = defaultQueries.Where(query => query.IsGenericMethod).OrderBy(query => query.GetParameters().Length).ToArray();
+        Assert.Equal(2, scopedQueries.Length);
+        Assert.All(scopedQueries, query =>
+        {
+            var scopeType = Assert.Single(query.GetGenericArguments());
+            var parameters = query.GetParameters();
+            Assert.Equal(typeof(string), parameters[0].ParameterType);
+            Assert.Equal(scopeType, parameters[1].ParameterType);
+        });
+        Assert.Equal(typeof(CancellationToken), scopedQueries[1].GetParameters()[2].ParameterType);
         Assert.All(defaultQueries, query =>
         {
             Assert.Equal(nameof(IEngarde.IsFeatureEnabledAsync), query.Name);
@@ -78,7 +90,7 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public async Task Inline_queries_use_registration_and_return_false_without_failure_handler()
+    public async Task Inline_queries_call_the_failure_handler_by_default()
     {
         var store = new Store();
         var failures = 0;
@@ -87,7 +99,7 @@ public sealed class RuntimeTests
         Assert.True(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));
         Assert.False(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("disabled"));
         Assert.True(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));
-        Assert.Equal(0, failures);
+        Assert.Equal(1, failures);
         await Assert.ThrowsAsync<ArgumentException>(() => Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync(" ").AsTask());
         await Assert.ThrowsAsync<ArgumentNullException>(() => Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync((string)null!).AsTask());
     }
@@ -120,7 +132,8 @@ public sealed class RuntimeTests
         await Task.WhenAll(Enumerable.Range(0, 20).Select(async _ => Assert.True(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"))));
         Assert.Equal(22, store.Calls);
         store.AllowEnabled = false;
-        Assert.False(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));
+        await Assert.ThrowsAsync<DisabledFeatureException>(() =>
+            Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled").AsTask());
         Assert.Throws<DisabledFeatureException>(Guarded.Enabled);
         Assert.Equal(24, store.Calls);
     }
@@ -152,10 +165,11 @@ public sealed class RuntimeTests
         Assert.False(await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("disabled"));
         Guarded.Disabled();
         var dto = new GuardedDto { Name = "value" };
-        Assert.Equal(2, calls.Count);
-        Assert.Equal(nameof(Guarded.Disabled), calls[0].Member.Name);
-        Assert.Equal(nameof(GuardedDto.Name), calls[1].Member.Name);
-        Assert.Equal("value", calls[1].Value);
+        Assert.Equal(3, calls.Count);
+        Assert.Equal(typeof(Engarde.Engarde), calls[0].Member);
+        Assert.Equal(nameof(Guarded.Disabled), calls[1].Member.Name);
+        Assert.Equal(nameof(GuardedDto.Name), calls[2].Member.Name);
+        Assert.Equal("value", calls[2].Value);
         Assert.Null(dto.Name);
     }
 
@@ -216,7 +230,7 @@ public sealed class RuntimeTests
     {
         async Task Check(bool enabled)
         {
-            await using var services = Services(new Store { AllowEnabled = enabled });
+            await using var services = Services(new Store { AllowEnabled = enabled }, (_, _) => { });
             using var active = Engarde.Engarde.BeginScope(services);
             await Task.Yield();
             Assert.Equal(enabled, await Engarde.Engarde.CreateInstance().IsFeatureEnabledAsync("enabled"));

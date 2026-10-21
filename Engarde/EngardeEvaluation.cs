@@ -13,6 +13,8 @@ internal sealed class EngardeEvaluation : IAsyncDisposable
     private readonly EngardeConfiguration? _configuration;
     internal IServiceProvider? Services { get; }
     internal CancellationToken CancellationToken { get; }
+    internal bool SkipInlineFailures => _configuration?.SkipInlineFailures == true;
+    internal bool SkipFallbackFailures => _configuration?.SkipFallbackFailures == true;
 
     private EngardeEvaluation(IServiceProvider? services, EngardeConfiguration? configuration, bool createScope,
         CancellationToken cancellationToken)

@@ -398,6 +398,44 @@ public sealed class GeneratorTests
     }
 
     [Fact]
+    public void Feature_guard_template_with_a_feature_constructor_also_generates_its_own_interface()
+    {
+        var (result, output) = Generate("""
+            [GenerateFeatureGuards("abc", "def")]
+            public partial class FeatureGuard(string featureName) : EngardeAttribute(featureName);
+            public static class Consumer
+            {
+                public static IFeatureGuard Dynamic => FeatureGuard.CreateInstance();
+                public static IAbcFeatureGuard Abc => AbcFeatureGuard.CreateInstance();
+                public static IDefFeatureGuard Def => DefFeatureGuard.CreateInstance();
+                public static async System.Threading.Tasks.ValueTask<bool> Check() =>
+                    await Dynamic.IsFeatureEnabledAsync("custom")
+                    && await Abc.IsFeatureEnabledAsync()
+                    && await Def.IsFeatureEnabledAsync();
+            }
+            """);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+        var contracts = result.GeneratedTrees.SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax>())
+            .ToDictionary(type => type.Identifier.ValueText);
+        Assert.Contains("IFeatureGuard", contracts.Keys);
+        Assert.Contains("IAbcFeatureGuard", contracts.Keys);
+        Assert.Contains("IDefFeatureGuard", contracts.Keys);
+        var dynamicQuery = Assert.Single(contracts["IFeatureGuard"].Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>(),
+            method => method.TypeParameterList is null && WithoutToken(method));
+        Assert.Equal("string featureFlagName", Assert.Single(dynamicQuery.ParameterList.Parameters).ToString());
+        Assert.Empty(contracts["IAbcFeatureGuard"].Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+            .Single(method => method.TypeParameterList is null && WithoutToken(method)).ParameterList.Parameters);
+        Assert.Empty(contracts["IDefFeatureGuard"].Members
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+            .Single(method => method.TypeParameterList is null && WithoutToken(method)).ParameterList.Parameters);
+    }
+
+    [Fact]
     public void Rejects_a_user_written_feature_bound_guard_that_is_not_sealed()
     {
         var (result, _) = Generate("public partial class FixedGuard : EngardeAttribute(\"fixed\");");
@@ -431,6 +469,11 @@ public sealed class GeneratorTests
         Assert.Equal("IEngarde", contract.Identifier.ValueText);
         Assert.Equal("IsFeatureEnabledAsync", method.Identifier.ValueText);
         Assert.Equal("string featureFlagName", Assert.Single(method.ParameterList.Parameters).ToString());
+        var scopedMethods = contract.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>()
+            .Where(candidate => candidate.TypeParameterList is not null).ToArray();
+        Assert.Equal(2, scopedMethods.Length);
+        Assert.Contains(scopedMethods, candidate => candidate.ParameterList.Parameters.Count == 2);
+        Assert.Contains(scopedMethods, candidate => candidate.ParameterList.Parameters.Count == 3);
         Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 

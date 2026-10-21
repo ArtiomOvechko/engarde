@@ -61,6 +61,40 @@ public sealed class InlineQueryTests
     }
 
     [Fact]
+    public async Task Default_queries_accept_a_scope_id_for_the_registered_store_and_validate_its_type()
+    {
+        var calls = new List<(string Flag, int Scope)>();
+        var missing = new List<string>();
+        await using var services = Services(calls, missing);
+        using var active = Guard.BeginScope(services);
+        IEngarde queries = Guard.CreateInstance();
+
+        Assert.True(await queries.IsFeatureEnabledAsync("enabled", 7));
+        Assert.False(await queries.IsFeatureEnabledAsync("enabled", 8));
+        Assert.Equal(new[] { ("enabled", 7), ("enabled", 8) }, calls);
+        Assert.Equal(new[] { "enabled" }, missing);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            queries.IsFeatureEnabledAsync("enabled", 7L).AsTask());
+    }
+
+    [Fact]
+    public async Task Global_skip_inline_failures_applies_to_default_and_custom_queries()
+    {
+        await using var services = new ServiceCollection().AddSingleton(new Store()).AddScoped<ScopeProvider>()
+            .AddEngarde(builder =>
+            {
+                builder.UseFeatureStore<Store, ScopeProvider, int>(
+                    (_, _, _) => ValueTask.FromResult(false), _ => ValueTask.FromResult(7));
+                builder.OnFeatureMissing((_, _) => throw new DisabledFeatureException("failure handler"));
+                builder.SkipInlineFailures = true;
+            }).BuildServiceProvider();
+        using var active = Guard.BeginScope(services);
+
+        Assert.False(await Guard.CreateInstance().IsFeatureEnabledAsync("disabled"));
+        Assert.False(await DisabledEngarde.CreateInstance().IsFeatureEnabledAsync());
+    }
+
+    [Fact]
     public async Task Feature_bound_guards_on_the_registered_store_accept_a_scope_id()
     {
         var calls = new List<(string Flag, int Scope)>();
@@ -99,6 +133,8 @@ public sealed class InlineQueryTests
         using var active = Guard.BeginScope(services);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => Guard.CreateInstance().IsFeatureEnabledAsync(new EnabledEngarde(), 7).AsTask());
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Guard.CreateInstance().IsFeatureEnabledAsync("enabled", 7).AsTask());
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Guard.CreateInstance().IsFeatureEnabledAsync(new FixedVariantGuard(FeatureVariant.Primary), 7).AsTask());
     }

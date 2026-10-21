@@ -42,12 +42,21 @@ public sealed partial class Engarde : IEngarde
     public ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName) => IsFeatureEnabledAsync(featureFlagName, default);
 
     /// <inheritdoc cref="IsFeatureEnabledAsync(string)"/>
-    public async ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName, CancellationToken cancellationToken)
-    {
-        ValidateFeatureName(featureFlagName, nameof(featureFlagName));
-        await using var evaluation = EngardeEvaluation.Begin(_queryServices, _createScopePerCall, cancellationToken);
-        return await evaluation.DefaultAsync(featureFlagName).ConfigureAwait(false);
-    }
+    public ValueTask<bool> IsFeatureEnabledAsync(string featureFlagName, CancellationToken cancellationToken) =>
+        QueryDefaultAsync(featureFlagName, null, cancellationToken);
+
+    /// <summary>
+    /// Evaluates a feature for the given feature scope id instead of resolving one.
+    /// <typeparamref name="TFeatureScopeId"/> must match the registered store's feature scope id.
+    /// </summary>
+    public ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(
+        string featureFlagName, TFeatureScopeId scopeId) =>
+        IsFeatureEnabledAsync(featureFlagName, scopeId, default);
+
+    /// <inheritdoc cref="IsFeatureEnabledAsync{TFeatureScopeId}(string, TFeatureScopeId)"/>
+    public ValueTask<bool> IsFeatureEnabledAsync<TFeatureScopeId>(
+        string featureFlagName, TFeatureScopeId scopeId, CancellationToken cancellationToken) =>
+        QueryDefaultAsync(featureFlagName, new ScopeIdOverride(scopeId), cancellationToken);
 
     /// <summary>
     /// Evaluates the feature names encapsulated by a guard using its configured store and scope.
@@ -109,11 +118,22 @@ public sealed partial class Engarde : IEngarde
             if (await guard.EvaluateAsync(evaluation, featureName, guardType, null, scopeId).ConfigureAwait(false))
                 continue;
             enabled = false;
-            if (SkipsInlineFailures(guardType))
+            if (evaluation.SkipInlineFailures || SkipsInlineFailures(guardType))
                 continue;
             context ??= evaluation.CreateContext(guardType, null, scopeId);
             guard.OnFeatureMissing(featureName, context);
         }
+        return enabled;
+    }
+
+    private async ValueTask<bool> QueryDefaultAsync(
+        string featureFlagName, ScopeIdOverride? scopeId, CancellationToken cancellationToken)
+    {
+        ValidateFeatureName(featureFlagName, nameof(featureFlagName));
+        await using var evaluation = EngardeEvaluation.Begin(_queryServices, _createScopePerCall, cancellationToken);
+        var enabled = await evaluation.DefaultAsync(featureFlagName, scopeId).ConfigureAwait(false);
+        if (!enabled && !evaluation.SkipInlineFailures)
+            evaluation.CreateContext(typeof(Engarde), null, scopeId).HandleFeatureMissing(featureFlagName);
         return enabled;
     }
 

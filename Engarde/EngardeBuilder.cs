@@ -8,6 +8,12 @@ public sealed class EngardeBuilder
     private Action<string, EngardeContext>? _onFeatureMissing;
     internal ServiceLifetime QueryLifetime { get; set; } = ServiceLifetime.Scoped;
 
+    /// <summary>When true, inline queries return false without calling <c>OnFeatureMissing</c>.</summary>
+    public bool SkipInlineFailures { get; set; }
+
+    /// <summary>When true, valid fallbacks dispatch without calling <c>OnFeatureMissing</c> first.</summary>
+    public bool SkipFallbackFailures { get; set; }
+
     /// <summary>
     /// Evaluates features without a feature scope
     /// </summary>
@@ -57,7 +63,9 @@ public sealed class EngardeBuilder
         return new EngardeConfiguration(
             _featureStore ?? throw new InvalidOperationException(
                 $"Feature guards need a feature store, call {nameof(UseFeatureStore)}"),
-            _onFeatureMissing ?? (static (_, _) => { }));
+            _onFeatureMissing ?? (static (_, _) => { }),
+            SkipInlineFailures,
+            SkipFallbackFailures);
     }
 }
 
@@ -68,4 +76,6 @@ internal sealed record FeatureStoreRegistration(
 
 internal sealed record EngardeConfiguration(
     FeatureStoreRegistration FeatureStore,
-    Action<string, EngardeContext> OnFeatureMissing);
+    Action<string, EngardeContext> OnFeatureMissing,
+    bool SkipInlineFailures,
+    bool SkipFallbackFailures);

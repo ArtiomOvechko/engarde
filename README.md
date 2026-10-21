@@ -165,12 +165,13 @@ When a class re-declares an interface whose members are implemented by methods i
 public sealed class Navigation(IEngarde engarde)
 {
     public ValueTask<bool> ShowPreviewAsync() => engarde.IsFeatureEnabledAsync("new-experience");
+
+    public ValueTask<bool> ShowPreviewForAsync(string userId) =>
+        engarde.IsFeatureEnabledAsync("new-experience", userId);
 }
 ```
 
-`IEngarde` only reports the status and never calls `OnFeatureMissing`.
-
-Every `IsFeatureEnabledAsync`, including those of generated guard interfaces, has an overload taking a `CancellationToken`. Custom guards receive it in the async methods they override (`IsEnabledAsync`, `GetScopeIdAsync`); attribute checks pass `CancellationToken.None`.
+`IEngarde` calls the configured `OnFeatureMissing` for a disabled feature and returns `false` when the handler returns normally.
 
 ## Custom guards
 
@@ -209,16 +210,22 @@ public partial class AccessGuard : EngardeAttribute;
 
 ### Failures in inline checks
 
-A guard's generated query calls `OnFeatureMissing` for each disabled feature; add `[SkipInlineFailures]` to return the Boolean result without calling it, while woven attribute checks still call it.
+Every inline query calls `OnFeatureMissing` for each disabled feature by default; add `[SkipInlineFailures]` to one custom guard or set `engarde.SkipInlineFailures = true` during registration to suppress failures for all inline queries.
 
 ```csharp
 [SkipInlineFailures]
 public sealed partial class MenuGuard() : EngardeAttribute("menu");
+
+builder.Services.AddEngarde(engarde =>
+{
+    engarde.SkipInlineFailures = true;
+    engarde.UseFeatureStore<FeatureStore>((store, feature) => store.IsEnabledAsync(feature));
+});
 ```
 
 ### Failures before fallbacks
 
-A valid method or type fallback calls `OnFeatureMissing` before dispatch by default, so throwing prevents the fallback; add `[SkipFallbackFailures]` to the custom guard class to dispatch without calling it.
+A valid method or type fallback calls `OnFeatureMissing` before dispatch by default, so throwing prevents the fallback; add `[SkipFallbackFailures]` to one custom guard or set `engarde.SkipFallbackFailures = true` during registration to suppress failures for all fallbacks.
 
 ```csharp
 [SkipFallbackFailures]
@@ -232,6 +239,12 @@ public sealed class Menu
 
     private void OpenLegacy() => OpenOld();
 }
+
+builder.Services.AddEngarde(engarde =>
+{
+    engarde.SkipFallbackFailures = true;
+    engarde.UseFeatureStore<FeatureStore>((store, feature) => store.IsEnabledAsync(feature));
+});
 ```
 
 ## Custom scope
