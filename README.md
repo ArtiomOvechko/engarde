@@ -294,4 +294,4 @@ public sealed class NewExperienceTests : UnitTestBase
 }
 ```
 
-Each guard gets `Enable<Guard>` and `Disable<Guard>` attributes for test classes and methods, optionally filtered by feature names. They are generated in the `Engarde.Testing` namespace, or in the guard's namespace when two guards share a name. They also cover the test class constructor and field initializers, so services created there are checked with the same overrides.
+Each guard gets `Disable<Guard>` attributes that stub matching checks as passed and `Enable<Guard>` attributes that stub them as failed through the usual missing-feature or fallback path, optionally filtered by feature name; unmatched checks evaluate normally, and overrides also cover test class constructors and field initializers.

@@ -73,10 +73,10 @@ public sealed class TestingOverrideGenerator : IIncrementalGenerator
             if (ns.Length != 0) source.Append("namespace ").Append(ns).Append(" {\n");
             source.Append("[global::System.AttributeUsage(global::System.AttributeTargets.Class | global::System.AttributeTargets.Method, Inherited = true, AllowMultiple = true)]\n")
                 .Append("public sealed class Enable").Append(name).Append("Attribute : global::Engarde.Testing.EngardeTestOverrideAttribute { public Enable")
-                .Append(name).Append("Attribute(params string[] featureNames) : base(true, ").Append(target).Append(", true, featureNames) { } }\n")
+                .Append(name).Append("Attribute(params string[] featureNames) : base(false, ").Append(target).Append(", true, featureNames) { } }\n")
                 .Append("[global::System.AttributeUsage(global::System.AttributeTargets.Class | global::System.AttributeTargets.Method, Inherited = true, AllowMultiple = true)]\n")
                 .Append("public sealed class Disable").Append(name).Append("Attribute : global::Engarde.Testing.EngardeTestOverrideAttribute { public Disable")
-                .Append(name).Append("Attribute(params string[] featureNames) : base(false, ").Append(target).Append(", true, featureNames) { } }\n");
+                .Append(name).Append("Attribute(params string[] featureNames) : base(true, ").Append(target).Append(", true, featureNames) { } }\n");
             if (ns.Length != 0) source.Append("}\n");
             using var hash = SHA256.Create();
             var suffix = string.Concat(hash.ComputeHash(Encoding.UTF8.GetBytes(identity)).Select(value => value.ToString("x2")));

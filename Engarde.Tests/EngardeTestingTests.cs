@@ -87,12 +87,23 @@ public sealed class EngardeTestingTests
     public void Named_feature_filters_apply_per_flag_for_all_and_specific_overrides()
     {
         TestingSelectableGuardAttribute.Evaluated.Clear();
+        TestingSelectableGuardAttribute.Failed.Clear();
         new NamedAllEnabledTest().Run();
-        Assert.Equal(new[] { "weather-feature" }, TestingSelectableGuardAttribute.Evaluated);
+        Assert.Empty(TestingSelectableGuardAttribute.Evaluated);
+        Assert.Equal(new[] { "weather-feature" }, TestingSelectableGuardAttribute.Failed);
 
         TestingSelectableGuardAttribute.Evaluated.Clear();
+        TestingSelectableGuardAttribute.Failed.Clear();
         new NamedSpecificDisabledTest().Run();
         Assert.Equal(new[] { "new-ui-experience" }, TestingSelectableGuardAttribute.Evaluated);
+        Assert.Empty(TestingSelectableGuardAttribute.Failed);
+    }
+
+    [Fact]
+    public void Forced_results_do_not_resolve_a_DI_based_guard()
+    {
+        new DiGuardDisabledTest().Run();
+        Assert.Throws<TestingDiGuardException>(() => new DiGuardEnabledTest().Run());
     }
 
     [DisableAllEngarde]
@@ -178,6 +189,18 @@ public sealed class EngardeTestingTests
     {
         public void Run() => TestingGuardedCode.Selectable();
     }
+
+    [DisableTestingDiGuard]
+    private sealed class DiGuardDisabledTest
+    {
+        public void Run() => TestingGuardedCode.DiBased();
+    }
+
+    [EnableTestingDiGuard]
+    private sealed class DiGuardEnabledTest
+    {
+        public void Run() => TestingGuardedCode.DiBased();
+    }
 }
 
 public sealed class TestingFirstGuardAttribute : EngardeAttribute
@@ -205,17 +228,34 @@ public sealed class TestingSecondGuardAttribute : EngardeAttribute
 public sealed class TestingSelectableGuardAttribute(params string[] featureNames) : EngardeAttribute(featureNames)
 {
     public static ConcurrentQueue<string> Evaluated { get; } = new();
+    public static ConcurrentQueue<string> Failed { get; } = new();
 
     protected override ValueTask<bool> IsEnabledAsync(string featureName, EngardeContext context, CancellationToken cancellationToken)
     {
         Evaluated.Enqueue(featureName);
         return ValueTask.FromResult(true);
     }
+
+    protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
+        Failed.Enqueue(featureName);
+}
+
+public sealed class TestingDiStore;
+
+public sealed class TestingDiGuardAttribute() : EngardeAttribute<TestingDiStore>("di")
+{
+    protected override ValueTask<bool> IsEnabledAsync(
+        TestingDiStore store, string featureName, CancellationToken cancellationToken) =>
+        throw new InvalidOperationException("A forced testing result must not resolve or invoke the feature store.");
+
+    protected override void OnFeatureMissing(string featureName, EngardeContext context) =>
+        throw new TestingDiGuardException();
 }
 
 public sealed class FirstTestingGuardException : Exception;
 public sealed class SecondTestingGuardException : Exception;
 public sealed class DefaultTestingGuardException : Exception;
+public sealed class TestingDiGuardException : Exception;
 
 public static class TestingGuardedCode
 {
@@ -224,6 +264,7 @@ public static class TestingGuardedCode
     [TestingFirstGuard] public static async Task FirstAsync() => await Task.Yield();
     [Engarde("default")] public static void Default() { }
     [TestingSelectableGuard("weather-feature", "new-ui-experience")] public static void Selectable() { }
+    [TestingDiGuard] public static void DiBased() { }
 }
 
 [Engarde("default")]

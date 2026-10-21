@@ -50,11 +50,11 @@ public static class EngardeTesting
             {
                 var all = attributes.LastOrDefault(attribute => attribute.IsAll && attribute.MatchesFeature(featureName));
                 if (all is not null)
-                    result = all.Enabled;
+                    result = all.GuardResult;
                 var specific = attributes.LastOrDefault(attribute => !attribute.IsAll
                     && attribute.Matches(guardType) && attribute.MatchesFeature(featureName));
                 if (specific is not null)
-                    result = specific.Enabled;
+                    result = specific.GuardResult;
             }
             return result;
         }

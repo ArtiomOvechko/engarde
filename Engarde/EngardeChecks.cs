@@ -24,7 +24,7 @@ public static class EngardeChecks
     private static readonly AsyncLocal<SuppressedGuard?> Suppressed = new();
     private static Func<Type, string, bool?>? _guardOverride;
 
-    /// <summary>Installs the optional guard override supplied by Engarde.Testing.</summary>
+    /// <summary>Installs the optional forced guard result supplied by Engarde.Testing.</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static void SetGuardOverride(Func<Type, string, bool?>? guardOverride) =>
         Volatile.Write(ref _guardOverride, guardOverride);
@@ -47,8 +47,7 @@ public static class EngardeChecks
     {
         await using var evaluation = EngardeEvaluation.Begin(services, false);
         foreach (var featureName in guard.FeatureNames)
-            if (IsGuardEnabled(guard, featureName) &&
-                !await guard.EvaluateAsync(evaluation, featureName, guardedType, null, null).ConfigureAwait(false))
+            if (!await EvaluateGuardAsync(evaluation, guard, featureName, guardedType, null).ConfigureAwait(false))
             {
                 if (!evaluation.SkipFallbackFailures && !SkipsFallbackFailures(guard.GetType()))
                     guard.OnFeatureMissing(featureName, evaluation.CreateContext(guardedType, null));
@@ -292,8 +291,7 @@ public static class EngardeChecks
             for (var index = 0; index < guard.FeatureNames.Count; index++)
             {
                 var featureName = guard.FeatureNames[index];
-                if (!IsGuardEnabled(guard, featureName) ||
-                    await guard.EvaluateAsync(evaluation, featureName, guards.Member, null, null).ConfigureAwait(false))
+                if (await EvaluateGuardAsync(evaluation, guard, featureName, guards.Member, null).ConfigureAwait(false))
                     continue;
 
                 var resolved = ResolveFallback(evaluation, (MethodInfo)guards.Member, guard, featureName, target, genericArguments);
@@ -366,9 +364,9 @@ public static class EngardeChecks
             for (var index = 0; index < guard.FeatureNames.Count; index++)
             {
                 var featureName = guard.FeatureNames[index];
-                if (!MatchesGuardedValue(guard, value) || !IsGuardEnabled(guard, featureName))
+                if (!MatchesGuardedValue(guard, value))
                     continue;
-                if (!await guard.EvaluateAsync(evaluation, featureName, guards.Member, value, null).ConfigureAwait(false))
+                if (!await EvaluateGuardAsync(evaluation, guard, featureName, guards.Member, value).ConfigureAwait(false))
                 {
                     enabled = false;
                     context ??= evaluation.CreateContext(guards.Member, value);
@@ -386,7 +384,7 @@ public static class EngardeChecks
             if (!MatchesGuardedValue(guard, value))
                 continue;
             for (var index = 0; index < guard.FeatureNames.Count; index++)
-                if (IsGuardEnabled(guard, guard.FeatureNames[index]))
+                if (GetGuardResultOverride(guard.GetType(), guard.FeatureNames[index]) != true)
                     return true;
         }
         return false;
@@ -395,9 +393,19 @@ public static class EngardeChecks
     private static bool MatchesGuardedValue(EngardeAttribute guard, object? value) =>
         !guard.HasGuardedValue || Equals(guard.GuardedValue, value);
 
-    private static bool IsGuardEnabled(EngardeAttribute guard, string featureName) =>
-        !IsSuppressed(guard.GetType(), featureName) &&
-        Volatile.Read(ref _guardOverride)?.Invoke(guard.GetType(), featureName) != false;
+    private static ValueTask<bool> EvaluateGuardAsync(EngardeEvaluation evaluation, EngardeAttribute guard,
+        string featureName, MemberInfo member, object? value)
+    {
+        var forced = GetGuardResultOverride(guard.GetType(), featureName);
+        return forced.HasValue
+            ? new ValueTask<bool>(forced.Value)
+            : guard.EvaluateAsync(evaluation, featureName, member, value, null);
+    }
+
+    private static bool? GetGuardResultOverride(Type guardType, string featureName) =>
+        IsSuppressed(guardType, featureName)
+            ? true
+            : Volatile.Read(ref _guardOverride)?.Invoke(guardType, featureName);
 
     private static bool IsSuppressed(Type guardType, string featureName)
     {
