@@ -8,10 +8,10 @@ public sealed class EngardeBuilder
     private Action<string, EngardeContext>? _onFeatureMissing;
     internal ServiceLifetime QueryLifetime { get; set; } = ServiceLifetime.Scoped;
 
-    /// <summary>When true, inline queries return false without calling <c>OnFeatureMissing</c>.</summary>
+    /// <summary>Default: false. When true, inline queries return false without calling <c>OnFeatureMissing</c>.</summary>
     public bool SkipInlineFailures { get; set; }
 
-    /// <summary>When true, valid fallbacks dispatch without calling <c>OnFeatureMissing</c> first.</summary>
+    /// <summary>Default: false. When true, fallbacks dispatch without calling <c>OnFeatureMissing</c> first.</summary>
     public bool SkipFallbackFailures { get; set; }
 
     /// <summary>

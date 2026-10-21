@@ -11,6 +11,7 @@
         <NoWarn>$(NoWarn);CS1591</NoWarn>
         <Version>1.0.0</Version>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <Description>En garde! Prepare your code to guard against unwanted access. Put feature toggles (flags) guards anywhere in the code: class, method, property or field. Engarde compiles feature toggle names into attributes and injectable services. Reuse toggle guards configured once with Engarde. Define failed toggle check behavior globally or per flag</Description>
     </PropertyGroup>
 

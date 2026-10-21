@@ -9,6 +9,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Version>1.0.0</Version>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Compile-time generated guard overrides for Engarde tests.</Description>
   </PropertyGroup>
   <ItemGroup>

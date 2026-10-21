@@ -95,12 +95,16 @@ Register a feature store and, optionally, how to resolve the scope ID (here, the
 ```csharp
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddSingleton<FeatureStore>();
-builder.Services.AddEngarde(engarde => engarde
-    .UseFeatureStore<FeatureStore, CurrentUser, string>(
-        (store, featureName, userId) => store.IsEnabledAsync(featureName, userId),
-        user => ValueTask.FromResult(user.Id))
-    .OnFeatureMissing((featureName, context) =>
-        throw new InvalidOperationException($"'{featureName}' is required by {context.Member.Name}")));
+builder.Services.AddEngarde(engarde =>
+    {
+        engarde.SkipInlineFailures = true;
+        engarde.SkipFallbackFailures = true;
+        engarde.UseFeatureStore<FeatureStore, CurrentUser, string>(
+            (store, featureName, userId) => store.IsEnabledAsync(featureName, userId),
+            user => ValueTask.FromResult(user.Id));
+        engarde.OnFeatureMissing((featureName, context) =>
+            throw new InvalidOperationException($"'{featureName}' is required by {context.Member.Name}"));
+    });
 
 var app = builder.Build();
 app.UseEngarde(); // checks use the request's services
